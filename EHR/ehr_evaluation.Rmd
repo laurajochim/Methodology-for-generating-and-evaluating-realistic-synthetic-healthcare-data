@@ -9,6 +9,10 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r loading packages, message=FALSE, warning=FALSE}
+#load packages
+
+library(tidyverse)
 library(rvinecopulib)
 library(kde1d)
 library(reticulate)
