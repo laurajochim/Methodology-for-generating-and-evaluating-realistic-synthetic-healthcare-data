@@ -35,67 +35,19 @@ reticulate::use_condaenv("thesis", required = T)
 
 # Breast Cancer Data - High Dimensional Data
 
-```{r preprocess tcga data}
-## Proteomics
-
-RPPA <- readr::read_delim("tcga_data/data_rppa_zscores.txt", delim = "\t")
-RPPA_demog <- readr::read_delim("tcga_data//data_clinical_patient.txt", delim = "\t")
-
-RPPA2 <- RPPA[,-1] %>% as.matrix %>% t %>% as.data.frame %>% tibble
-colnames(RPPA2) <- RPPA$Composite.Element.REF
-RPPA2$`Patient Identifier` <- names(RPPA)[-1]
-RPPA2 <- RPPA2 %>% relocate(`Patient Identifier`)
-
-
-
-RPPA_demog <- RPPA_demog %>% select(`Patient Identifier`, Sex, `Race Category`,`Menopause Status`, `Ethnicity Category`, `Diagnosis Age`,
-`Disease Free Status`, `Tumor Tissue Site`, `Overall Survival Status`)
-
- 
-
- 
-## Remove the -06 ones
-
-RPPA2 <- RPPA2 %>% filter(!str_detect(`Patient Identifier`, "-06"))
-
-RPPA2$`Patient Identifier` <- RPPA2$`Patient Identifier` %>% str_sub(end = -4)
-
- 
-# intersect(RPPA2$`Patient Identifier`, RPPA_demog$`Patient Identifier`)
-RPPA_tot <- inner_join(RPPA_demog, RPPA2)
-colnames(RPPA_tot) <- str_replace_all(colnames(RPPA_tot), " ", "_")
-colnames(RPPA_tot) <- str_replace_all(colnames(RPPA_tot), "-", "_")
-colnames(RPPA_tot) <- str_replace_all(colnames(RPPA_tot), "\\|", "_")
-colnames(RPPA_tot) <- str_replace_all(colnames(RPPA_tot), ";", "_")
-
- 
-#take a peak
-RPPA_tot %>% apply(2, \(x) length(unique(x))) %>% sort %>% head(n = 50)
-
-#classify diagnostic age as numeric
-RPPA_tot$Diagnosis_Age <- as.numeric(RPPA_tot$Diagnosis_Age)
-
-#remove tumor_tissue_sight, its all breast
-RPPA_tot <- RPPA_tot %>% select(-Tumor_Tissue_Site)
-
-
-#remove identifier
-RPPA_tot <- RPPA_tot[,-1]
-
-
-```
-
 
 ### look at the data
 
 ```{r check data}
 
+RPPA_nona <- read.csv("../data/clean/RPPA_nona.csv")
+
 summary(RPPA_tot)
 
-
+var_tcga <- ifelse(RPPA_nona %>% apply(2, \(x) length(unique(x))) %>% `<`(10), "d", "c")
 #look at correlations
 
-continuous_RPPA <- RPPA_fac[, which(var_tcga == "c")]
+continuous_RPPA <- RPPA_nona[, which(var_tcga == "c")]
 
 
 cor_matrix <- cor(continuous_RPPA, use = "pairwise.complete.obs", method = "pearson")
@@ -123,17 +75,6 @@ head(corr_RPPA, 20)
 # Print top correlations
 top_20_tcga <- head(corr_RPPA, 20)
 
-#NA's
-sum(is.na(RPPA_tot))
-colSums(is.na(RPPA_tot))
-# I actually have a lot of missingness, looking at the variables though the missingness is mainly for a few variables, some have up to 760 missing vlaues.. For now I will delete these rows but it think it is worth it to think of imputation at least for a few variables
-
-#in total it is 10 variables with missing values
-tcga_na <- names(which(colSums(is.na(RPPA_tot)) > 0))
-colSums(is.na(RPPA_tot))[colSums(is.na(RPPA_tot)) > 0]
-
-RPPA_nona <- RPPA_tot[, setdiff(names(RPPA_tot), tcga_na)]
-
 #write.csv(RPPA_nona, "cleaned_tcga.csv")
 
 #heatmap
@@ -146,7 +87,6 @@ hm.2 <- function(obj){
               key = T), silent = TRUE)
 }  
 
-var_tcga <- ifelse(RPPA_nona %>% apply(2, \(x) length(unique(x))) %>% `<`(10), "d", "c")
 
 RPPA_nona[,which(var_tcga %in% "c")] %>% cor %>% hm.2 
 

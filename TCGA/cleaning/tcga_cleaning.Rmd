@@ -1,0 +1,141 @@
+---
+title: "cleaning"
+author: "Laura Jochim"
+date: "2025-05-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#load libraries
+
+library(tidyverse)
+library(rvinecopulib)
+library(kde1d)
+library(reticulate)
+library(synthpop)
+library(utils)
+library(pryr)
+library(dplyr)
+library(progressr)
+library(gplots)
+library(glmnet)
+library(purrr)
+library(caret)
+library(ggplot2)
+library(philentropy)
+library(progress)
+
+#set virtual environment
+reticulate::use_condaenv("thesis", required = T) 
+```
+
+# Breast Cancer Data - Higher Dimensional Data 
+
+```{r preprocess tcga data}
+## Proteomics
+
+RPPA <- readr::read_delim("TCGA/data/raw/tcga_data/data_rppa_zscores.txt", delim = "\t")
+RPPA_demog <- readr::read_delim("TCGA/data/raw/tcga_data/data_clinical_patient.txt", delim = "\t")
+
+RPPA2 <- RPPA[,-1] %>% as.matrix %>% t %>% as.data.frame %>% tibble
+colnames(RPPA2) <- RPPA$Composite.Element.REF
+RPPA2$`Patient Identifier` <- names(RPPA)[-1]
+RPPA2 <- RPPA2 %>% relocate(`Patient Identifier`)
+
+
+
+RPPA_demog <- RPPA_demog %>% select(`Patient Identifier`, Sex, `Race Category`,`Menopause Status`, `Ethnicity Category`, `Diagnosis Age`,
+`Disease Free Status`, `Tumor Tissue Site`, `Overall Survival Status`)
+
+ 
+
+ 
+## Remove the -06 ones
+
+RPPA2 <- RPPA2 %>% filter(!str_detect(`Patient Identifier`, "-06"))
+
+RPPA2$`Patient Identifier` <- RPPA2$`Patient Identifier` %>% str_sub(end = -4)
+
+ 
+# intersect(RPPA2$`Patient Identifier`, RPPA_demog$`Patient Identifier`)
+RPPA_tot <- inner_join(RPPA_demog, RPPA2)
+colnames(RPPA_tot) <- str_replace_all(colnames(RPPA_tot), " ", "_")
+colnames(RPPA_tot) <- str_replace_all(colnames(RPPA_tot), "-", "_")
+colnames(RPPA_tot) <- str_replace_all(colnames(RPPA_tot), "\\|", "_")
+colnames(RPPA_tot) <- str_replace_all(colnames(RPPA_tot), ";", "_")
+
+ 
+#take a peak
+RPPA_tot %>% apply(2, \(x) length(unique(x))) %>% sort %>% head(n = 50)
+
+#classify diagnostic age as numeric
+RPPA_tot$Diagnosis_Age <- as.numeric(RPPA_tot$Diagnosis_Age)
+
+#remove tumor_tissue_sight, its all breast
+RPPA_tot <- RPPA_tot %>% select(-Tumor_Tissue_Site)
+
+
+#remove identifier
+RPPA_tot <- RPPA_tot[,-1]
+
+
+```
+
+```{r check data}
+
+summary(RPPA_tot)
+
+var_tcga <- ifelse(RPPA_tot %>% apply(2, \(x) length(unique(x))) %>% `<`(10), "d", "c")
+
+#look at correlations
+
+continuous_RPPA <- RPPA_tot[, which(var_tcga == "c")]
+
+
+cor_matrix <- cor(continuous_RPPA, use = "pairwise.complete.obs", method = "pearson")
+
+#make a table to the correlations
+corr_RPPA <- as.data.frame(as.table(cor_matrix))
+
+# Rename columns for clarity
+colnames(corr_RPPA) <- c("Var1", "Var2", "Correlation")
+
+# Remove self-correlations (Var1 == Var2)
+corr_RPPA <- subset(corr_RPPA, Var1 != Var2)
+
+# Create a consistent pair identifier (sorted variable names)
+corr_RPPA$Pair <- apply(corr_RPPA[, c("Var1", "Var2")], 1, function(x) paste(sort(x), collapse = "_"))
+
+# Remove duplicate pairs
+corr_RPPA <- corr_RPPA[!duplicated(corr_RPPA$Pair), ]
+
+# Sort by absolute correlation value in descending order
+corr_RPPA <- corr_RPPA[order(abs(corr_RPPA$Correlation), decreasing = TRUE), ]
+
+# Print top correlations
+head(corr_RPPA, 20)
+# Print top correlations
+top_20_tcga <- head(corr_RPPA, 20)
+
+#NA's
+sum(is.na(RPPA_tot))
+colSums(is.na(RPPA_tot))
+# I actually have a lot of missingness, looking at the variables though the missingness is mainly for a few variables, some have up to 760 missing vlaues.. For now I will delete these rows but it think it is worth it to think of imputation at least for a few variables
+
+#in total it is 10 variables with missing values
+tcga_na <- names(which(colSums(is.na(RPPA_tot)) > 0))
+colSums(is.na(RPPA_tot))[colSums(is.na(RPPA_tot)) > 0]
+
+RPPA_nona <- RPPA_tot[, setdiff(names(RPPA_tot), tcga_na)]
+
+```
+
+
+```{r save data}
+write.csv(RPPA_nona, "TCGA/data/clean/RPPA_nona.csv")
+```
+
