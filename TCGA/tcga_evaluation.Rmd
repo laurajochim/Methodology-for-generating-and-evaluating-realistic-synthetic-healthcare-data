@@ -1,0 +1,783 @@
+---
+title: "tcga_evaluation"
+author: "Laura Jochim"
+date: "2025-04-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#load libraries
+
+library(tidyverse)
+library(rvinecopulib)
+library(kde1d)
+library(reticulate)
+library(synthpop)
+library(utils)
+library(pryr)
+library(dplyr)
+library(progressr)
+library(gplots)
+library(glmnet)
+library(purrr)
+library(caret)
+library(ggplot2)
+library(philentropy)
+library(progress)
+
+#set virtual environment
+reticulate::use_condaenv("thesis", required = T) 
+```
+
+
+### Univartiate analysis 
+
+
+Synthpop vs. Original data
+```{r synthpop distribution}
+#get a bit of an idea of the data
+summary(RRPA_synthpop)
+#GGally::ggpairs(data.frame(ehr_synthpop$syn))
+
+RPPA_df <- as.data.frame(RPPA_nona)
+compare_syn <- synthpop::compare(RRPA_synthpop$syn, RPPA_df)
+compare_syn$plots
+
+ps_syn <- compare_syn$tab.utility
+ps_syn <- as.data.frame(ps_syn)
+
+ps_syn <- ps_syn %>%
+  rownames_to_column(var = "Variable") %>%  # Move row names into a column
+  arrange(desc(S_pMSE))  # Arrange by S_pMSE in descending order
+head(ps_syn, n = 20L)
+
+#purrr::walk(names(RRPA_synthpop$syn), \(ii) print(synthpop::compare(RRPA_synthpop$syn %>% select(!!sym(ii)),RPPA_df %>% select(!!sym(ii)))))
+
+##############################################################
+
+```
+
+
+VC vs. Original data
+
+```{r vc distribution}
+summary(tcga_vc)
+
+compare_tcga_vc <- synthpop::compare(tcga_vc, RPPA_df)
+compare_tcga_vc$plots
+
+ps_tcga_vc <- compare_tcga_vc$tab.utility
+ps_tcga_vc <- as.data.frame(ps_tcga_vc)
+
+ps_tcga_vc <- ps_tcga_vc %>%
+  rownames_to_column(var = "Variable") %>%  # Move row names into a column
+  arrange(desc(S_pMSE))  # Arrange by S_pMSE in descending order
+head(ps_tcga_vc, n = 20L)
+
+```
+
+
+ctGAN vs. Original data
+```{r ctGAN distribution}
+summary(tcga_ctgan2)
+
+compare_ctGAN <- synthpop::compare(tcga_ctgan, RPPA_df)
+compare_ctGAN$plots
+
+ps_ctGAN <- compare_ctGAN$tab.utility
+ps_ctGAN <- as.data.frame(ps_ctGAN)
+
+ps_ctGAN <- ps_ctGAN %>%
+  rownames_to_column(var = "Variable") %>%  # Move row names into a column
+  arrange(desc(S_pMSE))  # Arrange by S_pMSE in descending order
+head(ps_ctGAN, n = 20L)
+
+```
+
+```{r boxplots}
+
+# Combine the three datasets 
+ps_ctGAN$Method <- "CTGAN"
+ps_syn$Method <- "Synthpop"
+ps_tcga_vc$Method <- "Vine Copula"
+
+
+# Bind them into a single data frame
+ps_combined <- rbind(ps_ctGAN, ps_syn, ps_tcga_vc)
+
+# Remove the first 7 variables
+ps_combined <- ps_combined[-c(1:7), ]
+
+
+# Apply log transformation
+ps_combined$S_pMSE_log <- log1p(ps_combined$S_pMSE)
+
+# Create the boxplot
+
+# boxplot 1)
+
+boxplot(S_pMSE_log ~ Method, data = ps_combined, 
+        col = c("lightblue", "orange", "lightgreen"), 
+        main = "Comparison of Standardized pMSE (Log Scale) Across Methods",
+        ylab = "log transformation of standardized pMSE",
+        xlab = "Method",
+        border = "black")
+
+# Add a legend
+
+# boxplot 2)
+
+method_colors <- c("CTGAN" = "steelblue", 
+                   "Synthpop" = "tomato", 
+                   "Vine Copula" = "seagreen3")
+
+ggplot(ps_combined, aes(x = Method, y = S_pMSE_log, fill = Method)) +
+  geom_violin(trim = FALSE, alpha = 0.4, color = NA) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.6, color = "black") +
+  scale_fill_manual(values = method_colors) +
+  theme_minimal(base_size = 14) +
+  labs(title = "Comparison of Standardized pMSE (Log Scale) Across Methods",
+       x = "Method",
+       y = "log of standardized pMSE") +
+  theme(legend.position = "none")
+
+```
+
+
+### Bivariate
+
+Synthpop vs real data
+
+```{r synthpop correlation}
+
+#heat map
+
+RRPA_synthpop$syn[,which(var_tcga %in% "c")] %>% cor %>% hm.2 
+  
+
+# Subset only continuous variables based on var_tcga
+continuous_RPPA_syn <- RRPA_synthpop$syn[, which(var_tcga == "c")]
+
+# Calculate the correlation matrix (Spearman correlation becuase works for mixed data)
+corr_matrix_synthpop_tcga <- cor(continuous_RRPA_syn, use = "pairwise.complete.obs", method = "pearson")
+
+#make a table to the correlations
+corr_df_synthpop_tcga <- as.data.frame(as.table(corr_matrix_synthpop_tcga))
+
+# Rename columns for clarity
+colnames(corr_df_synthpop_tcga) <- c("Var1", "Var2", "Correlation")
+
+# Remove self-correlations (Var1 == Var2)
+corr_df_synthpop_tcga <- subset(corr_df_synthpop_tcga, Var1 != Var2)
+
+# Create a consistent pair identifier (sorted variable names)
+corr_df_synthpop_tcga $Pair <- apply(corr_df_synthpop_tcga[, c("Var1", "Var2")], 1, function(x) paste(sort(x), collapse = "_"))
+
+# Remove duplicate pairs
+corr_df_synthpop_tcga  <- corr_df_synthpop_tcga [!duplicated(corr_df_synthpop_tcga $Pair), ]
+
+# Sort by absolute correlation value in descending order
+corr_df_synthpop_tcga <- corr_df_synthpop_tcga[order(abs(corr_df_synthpop_tcga$Correlation), decreasing = TRUE), ]
+
+# Print top correlations
+top_20_synthpop_tcga <- head(corr_df_synthpop_tcga, 20)  # Display the top 20 strongest correlations
+top_20_synthpop_tcga
+
+
+# Find common pairs between top20 of real and top20 of synthetic
+common_pairs_syn <- intersect(top_20_tcga$Pair, top_20_synthpop_tcga$Pair)
+n_common_syn <- length(common_pairs_syn)
+cat("Number of top 20 real pairs also in top 20 synthetic:", n_common_syn, "\n")
+
+
+# make scatter plots of the 20 most correlating variables
+plot_data_syn <- top_20_tcga %>% 
+  rowwise() %>% 
+  do({
+    var1 <- .$Var1
+    var2 <- .$Var2
+    
+    # Create a label like "Var1 vs Var2"
+    var_label <- paste0(var1, " vs ", var2)
+    
+    # Extract real data
+    real_subset <- data.frame(
+      Var1_value = continuous_RPPA[[var1]],
+      Var2_value = continuous_RPPA[[var2]],
+      dataset = "real",
+      VarLabel = var_label  # store the label
+    )
+    
+    # Extract synthetic data
+    synth_subset <- data.frame(
+      Var1_value = continuous_RPPA_syn[[var1]],
+      Var2_value = continuous_RPPA_syn[[var2]],
+      dataset = "synthetic",
+      VarLabel = var_label
+    )
+    
+    dplyr::bind_rows(real_subset, synth_subset)
+  }) %>% 
+  ungroup()
+
+# Convert VarLabel to a factor to ensure it's used in faceting properly
+plot_data_syn <- plot_data_syn %>% mutate(VarLabel = as.factor(VarLabel))
+
+# Now create the scatterplots using facet_wrap on VarLabel
+ggplot(plot_data_syn, aes(x = Var1_value, y = Var2_value, color = dataset)) +
+   geom_point(data = subset(plot_data_syn, dataset == "real"), alpha = 0.8) +  
+  geom_point(data = subset(plot_data_syn, dataset == "synthetic"), alpha = 0.3)  +
+  facet_wrap(~ VarLabel, scales = "free") +
+  labs(x = "Value of Variable 1", 
+       y = "Value of Variable 2", 
+       title = "Scatterplots for 20 Highest Correlating Pairs (Real vs Synthpop)",
+       color = "Dataset") +
+  theme_minimal()
+
+
+```
+
+```{r vc correlation}
+
+#heat map
+
+tcga_vc[,which(var_tcga %in% "c")] %>% cor %>% hm.2 
+  
+
+# Subset only continuous variables based on var_tcga
+continuous_tcga_vc <- tcga_vc[, which(var_tcga == "c")]
+
+# Calculate the correlation matrix (Spearman correlation becuase works for mixed data)
+corr_matrix_vc_tcga <- cor(continuous_tcga_vc, use = "pairwise.complete.obs", method = "pearson")
+
+#make a table to the correlations
+corr_df_vc_tcga <- as.data.frame(as.table(corr_matrix_vc_tcga))
+
+# Rename columns for clarity
+colnames(corr_df_vc_tcga) <- c("Var1", "Var2", "Correlation")
+
+# Remove self-correlations (Var1 == Var2)
+corr_df_vc_tcga <- subset(corr_df_vc_tcga, Var1 != Var2)
+
+# Create a consistent pair identifier (sorted variable names)
+corr_df_vc_tcga $Pair <- apply(corr_df_vc_tcga[, c("Var1", "Var2")], 1, function(x) paste(sort(x), collapse = "_"))
+
+# Remove duplicate pairs
+corr_df_vc_tcga  <- corr_df_vc_tcga [!duplicated(corr_df_vc_tcga $Pair), ]
+
+# Sort by absolute correlation value in descending order
+corr_df_vc_tcga <- corr_df_vc_tcga[order(abs(corr_df_vc_tcga$Correlation), decreasing = TRUE), ]
+
+# Print top correlations
+top_20_vc_tcga <- head(corr_df_vc_tcga, 20)  # Display the top 20 strongest correlations
+top_20_vc_tcga
+
+
+# Find common pairs between top20 of real and top20 of synthetic
+common_pairs_vc <- intersect(top_20_tcga$Pair, top_20_vc_tcga$Pair)
+n_common_vc <- length(common_pairs_vc)
+cat("Number of top 20 real pairs also in top 20 synthetic:", n_common_vc, "\n")
+
+
+# make scatter plots of the 20 most correlating variables
+plot_data_vc <- top_20_tcga %>% 
+  rowwise() %>% 
+  do({
+    var1 <- .$Var1
+    var2 <- .$Var2
+    
+    # Create a label like "Var1 vs Var2"
+    var_label <- paste0(var1, " vs ", var2)
+    
+    # Extract real data
+    real_subset <- data.frame(
+      Var1_value = continuous_RPPA[[var1]],
+      Var2_value = continuous_RPPA[[var2]],
+      dataset = "real",
+      VarLabel = var_label  # store the label
+    )
+    
+    # Extract synthetic data
+    vc_subset <- data.frame(
+      Var1_value = continuous_tcga_vc[[var1]],
+      Var2_value = continuous_tcga_vc[[var2]],
+      dataset = "synthetic",
+      VarLabel = var_label
+    )
+    
+    dplyr::bind_rows(real_subset, vc_subset)
+  }) %>% 
+  ungroup()
+
+# Convert VarLabel to a factor to ensure it's used in faceting properly
+plot_data_vc <- plot_data_vc %>% mutate(VarLabel = as.factor(VarLabel))
+
+# Now create the scatterplots using facet_wrap on VarLabel
+ggplot(plot_data_vc, aes(x = Var1_value, y = Var2_value, color = dataset)) +
+geom_point(data = subset(plot_data_vc, dataset == "real"), alpha = 0.8) +  
+  geom_point(data = subset(plot_data_vc, dataset == "synthetic"), alpha = 0.3)  +
+  facet_wrap(~ VarLabel, scales = "free") +
+  labs(x = "Value of Variable 1", 
+       y = "Value of Variable 2", 
+       title = "Scatterplots for 20 Highest Correlating Pairs (Real vs Vine Copula)",
+       color = "Dataset") +
+  theme_minimal()
+
+
+```
+
+ctGAN vs real data
+```{r ctGAN correlation}
+
+#heat map
+
+tcga_ctgan2[,which(var_tcga %in% "c")] %>% cor %>% hm.2 
+
+
+#do the same for the ctgan data
+
+continuous_tcga_ctgan <- tcga_ctgan2[, which(var_tcga == "c")]
+
+# Calculate the correlation matrix (Spearman correlation becuase works for mixed data)
+corr_matrix_ctgan_tcga <- cor(continuous_tcga_ctgan, use = "pairwise.complete.obs", method = "pearson")
+
+#make a table to the correlations
+corr_df_ctgan_tcga <- as.data.frame(as.table(corr_matrix_ctgan_tcga))
+
+# Rename columns for clarity
+colnames(corr_df_ctgan_tcga) <- c("Var1", "Var2", "Correlation")
+
+# Remove self-correlations (Var1 == Var2)
+corr_df_ctgan_tcga <- subset(corr_df_ctgan_tcga, Var1 != Var2)
+
+# Create a consistent pair identifier (sorted variable names)
+corr_df_ctgan_tcga $Pair <- apply(corr_df_ctgan_tcga[, c("Var1", "Var2")], 1, function(x) paste(sort(x), collapse = "_"))
+
+# Remove duplicate pairs
+corr_df_ctgan_tcga  <- corr_df_ctgan_tcga [!duplicated(corr_df_ctgan_tcga$Pair), ]
+
+# Sort by absolute correlation value in descending order
+corr_df_ctgan_tcga <- corr_df_ctgan_tcga[order(abs(corr_df_ctgan_tcga$Correlation), decreasing = TRUE), ]
+
+# Print top correlations
+top_20_ctgan_tcga <- head(corr_df_ctgan_tcga, 20)  # Display the top 20 strongest correlations
+top_20_ctgan_tcga 
+
+# Find common pairs between top20 of real and top20 of synthetic
+common_pairs_ctgan <- intersect(top_20_tcga$Pair, top_20_ctgan_tcga $Pair)
+n_common_ctgan <- length(common_pairs_ctgan)
+cat("Number of top 20 real pairs also in top 20 synthetic:", n_common_ctgan, "\n")
+
+# make scatter plots of the 20 most correlating variables
+plot_data_ctgan <- top_20_tcga %>% 
+  rowwise() %>% 
+  do({
+    var1 <- .$Var1
+    var2 <- .$Var2
+    
+    # Create a label like "Var1 vs Var2"
+    var_label <- paste0(var1, " vs ", var2)
+    
+    # Extract real data
+    real_subset <- data.frame(
+      Var1_value = continuous_RPPA[[var1]],
+      Var2_value = continuous_RPPA[[var2]],
+      dataset = "real",
+      VarLabel = var_label  # store the label
+    )
+    
+    # Extract synthetic data
+    ctgan_subset <- data.frame(
+      Var1_value = continuous_tcga_ctgan[[var1]],
+      Var2_value = continuous_tcga_ctgan[[var2]],
+      dataset = "synthetic",
+      VarLabel = var_label
+    )
+    
+    dplyr::bind_rows(real_subset, ctgan_subset)
+  }) %>% 
+  ungroup()
+
+# Convert VarLabel to a factor to ensure it's used in faceting properly
+plot_data_ctgan <- plot_data_ctgan %>% mutate(VarLabel = as.factor(VarLabel))
+
+# Now create the scatterplots using facet_wrap on VarLabel
+ggplot(plot_data_ctgan, aes(x = Var1_value, y = Var2_value, color = dataset)) +
+  geom_point(data = subset(plot_data_ctgan, dataset == "real"), alpha = 0.8) +  
+  geom_point(data = subset(plot_data_ctgan, dataset == "synthetic"), alpha = 0.25)  +
+  facet_wrap(~ VarLabel, scales = "free") +
+  labs(x = "Value of Variable 1", 
+       y = "Value of Variable 2", 
+       title = "Scatterplots for 20 Highest Correlating Pairs (Real vs ctGAN)",
+       color = "Dataset") +
+  theme_minimal()
+
+```
+
+```{r bivariate boxplots}
+###############################################################################
+# column wise correlation using pearson
+
+# Calculate Pearson correlation matrices for real and synthetic data
+corr_real <- cor(continuous_RPPA, use = "pairwise.complete.obs", method = "pearson")
+corr_syn  <- cor(continuous_RPPA_syn, use = "pairwise.complete.obs", method = "pearson")
+
+# Compute the absolute differences between the two correlation matrices
+abs_diff <- abs(corr_real - corr_syn)
+
+# Extract the upper triangle of the difference matrix (excluding the diagonal)
+upper_tri_indices <- upper.tri(abs_diff, diag = FALSE)
+mean_abs_diff <- mean(abs_diff[upper_tri_indices])
+
+# Multiply by a scaling factor (e.g., 100) for presentation purposes
+#correlation_distance <- mean_abs_diff * 100
+
+# Print the correlation distance
+print(mean_abs_diff)
+#########################################################################################
+
+# Function to compute the absolute differences for the unique (upper triangle) correlations
+compute_corr_diff <- function(real_data, synth_data) {
+  # Compute Pearson correlation matrices
+  corr_real <- cor(real_data, use = "pairwise.complete.obs", method = "pearson")
+  corr_syn  <- cor(synth_data, use = "pairwise.complete.obs", method = "pearson")
+  
+  # Compute absolute differences between matrices
+  abs_diff <- abs(corr_real - corr_syn)
+  
+  # Extract the upper triangle (excluding the diagonal)
+  unique_diff <- abs_diff[upper.tri(abs_diff, diag = FALSE)]
+  return(unique_diff)
+}
+
+ 
+# continuous_RPPA_ctgan for CTGAN, and continuous_RPPA_vine for Vine Copula)
+abs_diff_synthpop <- compute_corr_diff(continuous_RPPA, continuous_RPPA_syn)
+abs_diff_ctgan    <- compute_corr_diff(continuous_RPPA, continuous_tcga_ctgan)
+abs_diff_vc     <- compute_corr_diff(continuous_RPPA, continuous_tcga_vc)
+
+# Combine into one data frame for ggplot2
+abs_diff_df <- data.frame(
+  Method = c(rep("Synthpop", length(abs_diff_synthpop)),
+             rep("CTGAN", length(abs_diff_ctgan)),
+             rep("Vine Copula", length(abs_diff_vc))),
+  AbsDifference = c(abs_diff_synthpop, abs_diff_ctgan, abs_diff_vc)
+)
+
+# Define colors for each method
+method_colors <- c("CTGAN" = "steelblue", 
+                   "Synthpop" = "tomato", 
+                   "Vine Copula" = "seagreen3")
+
+# Create the plot with violin and boxplot layers
+ggplot(abs_diff_df, aes(x = Method, y = AbsDifference, fill = Method)) +
+  geom_violin(trim = FALSE, alpha = 0.4, color = NA) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.6, color = "black") +
+  scale_fill_manual(values = method_colors) +
+  theme_minimal(base_size = 14) +
+  labs(title = "Absolute Correlation Differences Across Methods",
+       x = "Method",
+       y = "Absolute Correlation Difference") +
+  theme(legend.position = "none")
+
+```
+
+
+
+
+
+### Mutlivariate
+
+Synthpop vs real data
+```{r synthpop logreg}
+
+
+#add label
+real_data_tcga <- RPPA_nona
+real_data_tcga$label <- "real"
+synthpop_data_tcga <- RRPA_synthpop$syn
+synthpop_data_tcga$label <- "fake"
+
+#rbind the two data sets
+synthpop_combined_tcga <- rbind(real_data_tcga, synthpop_data_tcga)
+
+#shuffle data
+set.seed(123)
+synthpop_combined_tcga <- synthpop_combined_tcga[sample(nrow(synthpop_combined_tcga)), ]
+
+#train test split 70-30
+train_index_syn_tcga <- sample(seq_len(nrow(synthpop_combined_tcga)), size = 0.7 * nrow(synthpop_combined_tcga))
+train_data_syn_tcga <- synthpop_combined_tcga[train_index_syn_tcga, ]
+test_data_syn_tcga  <- synthpop_combined_tcga[-train_index_syn_tcga, ]
+
+
+#split label from feature
+X_train_syn_tcga <- model.matrix(label ~ . - 1, data = train_data_syn_tcga)
+y_train_syn_tcga <- train_data_syn_tcga$label
+
+# Cross-validated ridge logistic regression (alpha = 0 for ridge)
+cv_ridge_syn_tcga <- cv.glmnet(X_train_syn_tcga, y_train_syn_tcga, family = "binomial", alpha = 0, nfolds = 10)
+
+# Get the best lambda (regularization parameter) based on CV
+best_lambda_syn_tcga <- cv_ridge_syn_tcga$lambda.min
+cat("Best lambda from CV:", best_lambda_syn_tcga, "\n")
+#best lambda is 1.73..
+
+# Fit the final ridge logistic regression model using the selected lambda
+ridge_model_syn_tcga <- glmnet(X_train_syn_tcga, y_train_syn_tcga, family = "binomial", alpha = 0, lambda = best_lambda_syn_tcga)
+
+print(coef(ridge_model_syn_tcga))
+
+# split label from feature for test data
+X_test_syn_tcga <- model.matrix(label ~ . - 1, data = test_data_syn_tcga)
+y_test_syn_tcga <- test_data_syn_tcga$label
+
+# Get predicted probabilities from the model on test data:
+#predictions_prob_syn_tcga <- predict(ridge_model_syn_tcga, newx = X_test_syn_tcga, type = "response")
+
+#we run into a problem because the columns dont match up, we are missing one column in race for american indian in the test set
+
+# Get column names from the training design matrix
+train_cols <- colnames(X_train_syn_tcga)
+# Identify columns missing in the test design matrix
+missing_cols <- setdiff(train_cols, colnames(X_test_syn_tcga))
+
+# Add the missing columns (filled with zeros) to the test matrix
+if(length(missing_cols) > 0){
+  X_test_syn_tcga <- cbind(X_test_syn_tcga,
+                           matrix(0,
+                                  nrow = nrow(X_test_syn_tcga),
+                                  ncol = length(missing_cols),
+                                  dimnames = list(NULL, missing_cols)))
+}
+
+# Reorder the test matrix columns to match the training matrix
+X_test_syn_tcga <- X_test_syn_tcga[, train_cols]
+
+# now repeat:
+# Get predicted probabilities from the model on test data:
+predictions_prob_syn_tcga <- predict(ridge_model_syn_tcga, newx = X_test_syn_tcga, type = "response")
+
+
+
+# Convert probabilities to class labels using a threshold of 0.5.
+# Note: Ensure that the levels match those in your data.
+predictions_class_syn_tcga <- ifelse(predictions_prob_syn_tcga > 0.5, "real", "fake")
+
+# Calculate the accuracy of the predictions:
+accuracy_syn_tcga <- mean(predictions_class_syn_tcga == y_test_syn_tcga)
+cat("Test Accuracy:", accuracy_syn_tcga, "\n")
+
+#i think accuracy is a good enough measure in this case because we have class balance but could also include F1 and ROC AUC
+```
+
+```{r random forest synthpop}
+library(randomForest)
+library(caret)
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Ensure your label is a factor
+train_data_syn_tcga$label <- factor(train_data_syn_tcga$label, levels = c("fake","real"))
+test_data_syn_tcga$label  <- factor(test_data_syn_tcga$label,  levels = c("fake","real"))
+
+# 1.1 Fit default RF (ntree=500, mtry=floor(sqrt(p)))
+rf_default <- randomForest(
+  label ~ ., 
+  data   = train_data_syn_tcga
+)
+
+# 1.2 Inspect
+print(rf_default)
+#   - OOB estimate of error rate, variable importance, etc.
+
+# 1.3 Predict on test set
+pred_labels <- predict(rf_default, newdata = test_data_syn_tcga, type = "response")
+accuracy  <- mean(pred_labels == test_data_syn_tcga$label)
+cat("RF Test Accuracy:", round(accuracy,4), "\n")
+
+#RF Test Accuracy: 0.695 
+
+```
+
+####################################################################
+
+```{r vc glmnet logreg}
+#add label
+real_data_tcga <- RPPA_nona
+real_data_tcga$label <- "real"
+vc_data_tcga <- tcga_vc
+vc_data_tcga$label <- "fake"
+
+#rbind the two data sets
+vc_combined_tcga <- rbind(real_data_tcga, vc_data_tcga)
+
+#shuffle data
+set.seed(123)
+vc_combined_tcga <- vc_combined_tcga[sample(nrow(vc_combined_tcga)), ]
+
+#train test split 70-30
+train_index_vc_tcga <- sample(seq_len(nrow(vc_combined_tcga)), size = 0.7 * nrow(vc_combined_tcga))
+train_data_vc_tcga <- vc_combined_tcga[train_index_vc_tcga, ]
+test_data_vc_tcga  <- vc_combined_tcga[-train_index_vc_tcga, ]
+
+
+#split label from feature
+X_train_vc_tcga <- model.matrix(label ~ . - 1, data = train_data_vc_tcga)
+y_train_vc_tcga <- train_data_vc_tcga$label
+
+# Cross-validated ridge logistic regression (alpha = 0 for ridge)
+cv_ridge_vc_tcga <- cv.glmnet(X_train_vc_tcga, y_train_vc_tcga, family = "binomial", alpha = 0, nfolds = 10)
+
+# Get the best lambda (regularization parameter) based on CV
+best_lambda_vc_tcga <- cv_ridge_vc_tcga$lambda.min
+cat("Best lambda from CV:", best_lambda_vc_tcga, "\n")
+#best lambda is 1.73..
+
+# Fit the final ridge logistic regression model using the selected lambda
+ridge_model_vc_tcga <- glmnet(X_train_vc_tcga, y_train_vc_tcga, family = "binomial", alpha = 0, lambda = best_lambda_vc_tcga)
+
+print(coef(ridge_model_vc_tcga))
+
+# split label from feature for test data
+X_test_vc_tcga <- model.matrix(label ~ . - 1, data = test_data_vc_tcga)
+y_test_vc_tcga <- test_data_vc_tcga$label
+
+# Get predicted probabilities from the model on test data:
+predictions_prob_vc_tcga <- predict(ridge_model_vc_tcga, newx = X_test_vc_tcga, type = "response")
+
+
+# Convert probabilities to class labels using a threshold of 0.5.
+# Note: Ensure that the levels match those in your data.
+predictions_class_vc_tcga <- ifelse(predictions_prob_vc_tcga > 0.5, "real", "fake")
+
+# Calculate the accuracy of the predictions:
+accuracy_vc_tcga <- mean(predictions_class_vc_tcga == y_test_vc_tcga)
+cat("Test Accuracy:", accuracy_vc_tcga, "\n")
+
+
+
+```
+
+```{r random forest vc}
+library(randomForest)
+library(caret)
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Ensure your label is a factor
+train_data_vc_tcga$label <- factor(train_data_vc_tcga$label, levels = c("fake","real"))
+test_data_vc_tcga$label  <- factor(test_data_vc_tcga$label,  levels = c("fake","real"))
+
+# 1.1 Fit default RF (ntree=500, mtry=floor(sqrt(p)))
+rf_default <- randomForest(
+  label ~ ., 
+  data   = train_data_vc_tcga
+)
+
+# 1.2 Inspect
+print(rf_default)
+#   - OOB estimate of error rate, variable importance, etc.
+
+# 1.3 Predict on test set
+pred_labels <- predict(rf_default, newdata = test_data_vc_tcga, type = "response")
+accuracy  <- mean(pred_labels == test_data_vc_tcga$label)
+cat("RF Test Accuracy:", round(accuracy,4), "\n")
+
+#RF Test Accuracy: 0.6871 
+
+```
+#######################################################
+
+ctGAN vs real data
+```{r ctGAN glmnet logreg}
+
+
+# Add label
+real_data_tcga <-  RPPA_nona
+real_data_tcga$label <- "real"
+ctgan_data_tcga <- tcga_ctgan
+ctgan_data_tcga$label <- "fake"
+
+# rbind the two data sets
+ctgan_combined_tcga <- rbind(real_data_tcga, ctgan_data_tcga)
+
+# Shuffle data
+set.seed(123)
+ctgan_combined_tcga <- ctgan_combined_tcga[sample(nrow(ctgan_combined_tcga)), ]
+
+# Train-test split 70-30
+train_index_ctgan_tcga <- sample(seq_len(nrow(ctgan_combined_tcga)), size = 0.7 * nrow(ctgan_combined_tcga))
+train_data_ctgan_tcga <- ctgan_combined_tcga[train_index_ctgan_tcga, ]
+test_data_ctgan_tcga  <- ctgan_combined_tcga[-train_index_ctgan_tcga, ]
+
+# Split label from feature
+X_train_ctgan_tcga <- model.matrix(label ~ . - 1, data = train_data_ctgan_tcga)
+y_train_ctgan_tcga <- train_data_ctgan_tcga$label
+
+# Cross-validated ridge logistic regression (alpha = 0 for ridge)
+cv_ridge_ctgan_tcga <- cv.glmnet(X_train_ctgan_tcga, y_train_ctgan_tcga, family = "binomial", alpha = 0, nfolds = 10)
+
+# Get the best lambda (regularization parameter) based on CV
+best_lambda_ctgan_tcga <- cv_ridge_ctgan_tcga$lambda.min
+cat("Best lambda from CV:", best_lambda_ctgan_tcga, "\n")
+
+# Fit the final ridge logistic regression model using the selected lambda
+ridge_model_ctgan_tcga <- glmnet(X_train_ctgan_tcga, y_train_ctgan_tcga, family = "binomial", alpha = 0, lambda = best_lambda_ctgan_tcga)
+
+print(coef(ridge_model_ctgan_tcga))
+
+# Split label from feature for test data
+X_test_ctgan_tcga <- model.matrix(label ~ . - 1, data = test_data_ctgan_tcga)
+y_test_ctgan_tcga <- test_data_ctgan_tcga$label
+
+# Get predicted probabilities from the model on test data:
+predictions_prob_ctgan_tcga <- predict(ridge_model_ctgan_tcga, newx = X_test_ctgan_tcga, type = "response")
+
+# Convert probabilities to class labels using a threshold of 0.5.
+# Note: Ensure that the levels match those in your data.
+predictions_class_ctgan_tcga <- ifelse(predictions_prob_ctgan_tcga > 0.5, "real", "fake")
+
+# Calculate the accuracy of the predictions:
+accuracy_ctgan_tcga <- mean(predictions_class_ctgan_tcga == y_test_ctgan_tcga)
+cat("Test Accuracy:", accuracy_ctgan_tcga, "\n")
+
+#i think accuracy is a good enough measure in this case because we have class balance but could also include F1 and ROC AUC
+```
+
+```{r random forest ctGAN}
+library(randomForest)
+library(caret)
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Ensure your label is a factor
+train_data_ctgan_tcga$label <- factor(train_data_ctgan_tcga$label, levels = c("fake","real"))
+test_data_ctgan_tcga$label  <- factor(test_data_ctgan_tcga$label,  levels = c("fake","real"))
+
+# 1.1 Fit default RF (ntree=500, mtry=floor(sqrt(p)))
+rf_default <- randomForest(
+  label ~ ., 
+  data   = train_data_ctgan_tcga
+)
+
+# 1.2 Inspect
+print(rf_default)
+#   - OOB estimate of error rate, variable importance, etc.
+
+# 1.3 Predict on test set
+pred_labels <- predict(rf_default, newdata = test_data_ctgan_tcga, type = "response")
+accuracy  <- mean(pred_labels == test_data_ctgan_tcga$label)
+cat("RF Test Accuracy:", round(accuracy,4), "\n")
+
+#RF Test Accuracy: 1
+
+```
+#####################################################################

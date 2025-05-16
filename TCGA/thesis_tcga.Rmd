@@ -1,0 +1,972 @@
+---
+title: "TCGA_Breastcancer"
+author: "Laura Jochim"
+date: "2025-03-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#load libraries
+
+library(tidyverse)
+library(rvinecopulib)
+library(kde1d)
+library(reticulate)
+library(synthpop)
+library(utils)
+library(pryr)
+library(dplyr)
+library(progressr)
+library(gplots)
+library(glmnet)
+library(purrr)
+library(caret)
+library(ggplot2)
+library(philentropy)
+library(progress)
+
+#set virtual environment
+reticulate::use_condaenv("thesis", required = T) 
+```
+
+# Breast Cancer Data - High Dimensional Data
+
+```{r preprocess tcga data}
+## Proteomics
+
+RPPA <- readr::read_delim("tcga_data/data_rppa_zscores.txt", delim = "\t")
+RPPA_demog <- readr::read_delim("tcga_data//data_clinical_patient.txt", delim = "\t")
+
+RPPA2 <- RPPA[,-1] %>% as.matrix %>% t %>% as.data.frame %>% tibble
+colnames(RPPA2) <- RPPA$Composite.Element.REF
+RPPA2$`Patient Identifier` <- names(RPPA)[-1]
+RPPA2 <- RPPA2 %>% relocate(`Patient Identifier`)
+
+
+
+RPPA_demog <- RPPA_demog %>% select(`Patient Identifier`, Sex, `Race Category`,`Menopause Status`, `Ethnicity Category`, `Diagnosis Age`,
+`Disease Free Status`, `Tumor Tissue Site`, `Overall Survival Status`)
+
+ 
+
+ 
+## Remove the -06 ones
+
+RPPA2 <- RPPA2 %>% filter(!str_detect(`Patient Identifier`, "-06"))
+
+RPPA2$`Patient Identifier` <- RPPA2$`Patient Identifier` %>% str_sub(end = -4)
+
+ 
+# intersect(RPPA2$`Patient Identifier`, RPPA_demog$`Patient Identifier`)
+RPPA_tot <- inner_join(RPPA_demog, RPPA2)
+colnames(RPPA_tot) <- str_replace_all(colnames(RPPA_tot), " ", "_")
+colnames(RPPA_tot) <- str_replace_all(colnames(RPPA_tot), "-", "_")
+colnames(RPPA_tot) <- str_replace_all(colnames(RPPA_tot), "\\|", "_")
+colnames(RPPA_tot) <- str_replace_all(colnames(RPPA_tot), ";", "_")
+
+ 
+#take a peak
+RPPA_tot %>% apply(2, \(x) length(unique(x))) %>% sort %>% head(n = 50)
+
+#classify diagnostic age as numeric
+RPPA_tot$Diagnosis_Age <- as.numeric(RPPA_tot$Diagnosis_Age)
+
+#remove tumor_tissue_sight, its all breast
+RPPA_tot <- RPPA_tot %>% select(-Tumor_Tissue_Site)
+
+
+#remove identifier
+RPPA_tot <- RPPA_tot[,-1]
+
+
+```
+
+
+### look at the data
+
+```{r check data}
+
+summary(RPPA_tot)
+
+
+#look at correlations
+
+continuous_RPPA <- RPPA_fac[, which(var_tcga == "c")]
+
+
+cor_matrix <- cor(continuous_RPPA, use = "pairwise.complete.obs", method = "pearson")
+
+#make a table to the correlations
+corr_RPPA <- as.data.frame(as.table(cor_matrix))
+
+# Rename columns for clarity
+colnames(corr_RPPA) <- c("Var1", "Var2", "Correlation")
+
+# Remove self-correlations (Var1 == Var2)
+corr_RPPA <- subset(corr_RPPA, Var1 != Var2)
+
+# Create a consistent pair identifier (sorted variable names)
+corr_RPPA$Pair <- apply(corr_RPPA[, c("Var1", "Var2")], 1, function(x) paste(sort(x), collapse = "_"))
+
+# Remove duplicate pairs
+corr_RPPA <- corr_RPPA[!duplicated(corr_RPPA$Pair), ]
+
+# Sort by absolute correlation value in descending order
+corr_RPPA <- corr_RPPA[order(abs(corr_RPPA$Correlation), decreasing = TRUE), ]
+
+# Print top correlations
+head(corr_RPPA, 20)
+# Print top correlations
+top_20_tcga <- head(corr_RPPA, 20)
+
+#NA's
+sum(is.na(RPPA_tot))
+colSums(is.na(RPPA_tot))
+# I actually have a lot of missingness, looking at the variables though the missingness is mainly for a few variables, some have up to 760 missing vlaues.. For now I will delete these rows but it think it is worth it to think of imputation at least for a few variables
+
+#in total it is 10 variables with missing values
+tcga_na <- names(which(colSums(is.na(RPPA_tot)) > 0))
+colSums(is.na(RPPA_tot))[colSums(is.na(RPPA_tot)) > 0]
+
+RPPA_nona <- RPPA_tot[, setdiff(names(RPPA_tot), tcga_na)]
+
+#write.csv(RPPA_nona, "cleaned_tcga.csv")
+
+#heatmap
+hm.2 <- function(obj){
+  try(
+    heatmap.2(obj,Rowv=F,symm=T,col=colorRampPalette(c("brown","white","yellow"))(25),
+              dendrogram='none'
+              ,trace='none'
+              ,symkey=TRUE,breaks=seq(-1,1,length=26),
+              key = T), silent = TRUE)
+}  
+
+var_tcga <- ifelse(RPPA_nona %>% apply(2, \(x) length(unique(x))) %>% `<`(10), "d", "c")
+
+RPPA_nona[,which(var_tcga %in% "c")] %>% cor %>% hm.2 
+
+```
+
+
+### Synthpop
+
+```{r synthpop, message= F, warning=FALSE}
+
+#set seed for reproducabulity
+set.seed(123)
+
+
+#change characters into factors
+RPPA_fac <- RPPA_nona %>%
+  mutate(across(where(is.character), as.factor))
+
+#create synthetic data using synthpop
+  #record time
+start_time <- Sys.time()
+
+RPPA_synthpop <- synthpop::syn(RPPA_fac)
+
+  #record end time
+end_time <- Sys.time()
+# Calculate the difference in time
+execution_time <- end_time - start_time
+print(execution_time)
+#it took around 1.8 minutes to run synthpop
+
+```
+
+### VC tcga
+
+```{r vine copula tcga}
+#RPPA_nona <- read.csv("cleaned_tcga.csv")[, -1]
+source("https://raw.githubusercontent.com/selbouhaddani/copula_vps/refs/heads/main/scripts/functions/estimate_vinecopula_from_data.R")
+
+
+#chnage factors to numerical
+RPPA_num <- RPPA_fac %>% mutate(across(where(is.factor), \(x) x %>% as.numeric))
+
+#make a list 
+var_types_tcga <- ifelse(RPPA_nona %>% apply(2, \(x) length(unique(x))) %>% `<`(10), "d", "c")
+
+set.seed(123)
+
+#record time
+start_time <- Sys.time()  
+
+cat("Starting...\n")
+print(start_time)
+
+system.time({fit_vc_tcga <- estimate_vinecopula_from_data(RPPA_num[1:50,], var_types = var_types_tcga)})
+
+cat("Ending...\n")
+print(Sys.time() - start_time)
+print(Sys.time())
+
+#this took around half an hour:'))
+
+load("fit_vc_tcga_800_20250331.RData")
+N <- nrow(RPPA_num)
+
+tcga_vc <- simulate.estVineCopula(fit_vc_tcga, 1.5*N)
+
+#load("tcga_vc_dataset_after_PP.RData")
+
+```
+```{r look at vine copula, message=F, warning=FALSE}
+#contour plots of the pair copulas
+contour(fit_vc_tcga$vine_copula)#cant really see shit
+
+#the R-vine diagram
+plot(fit_vc_tcga$vine_copula)
+
+#count of which density was used how many times to estimate the joint distribution
+table(unlist(lapply(fit_vc_tcga$vine_copula$pair_copulas, function(inner_list) {
+  sapply(inner_list, function(x) x$family)
+})))
+
+
+```
+
+```{r vine copula tcga 2, message=F, warning=FALSE}
+
+#for this to run properly i need more iterations above (Sex did not capture men....)
+#transform the categorical columns back the original categories
+tcga_vc <- tcga_vc %>% 
+  filter(Sex %in% unique(RPPA_num$Sex)) %>%
+  mutate(Sex = factor(Sex, labels = levels(RPPA_fac$Sex)))
+
+tcga_vc <- tcga_vc %>% 
+  filter(Race_Category %in% unique(RPPA_num$Race_Category)) %>%
+  mutate(Race_Category = factor(Race_Category, labels = levels(RPPA_fac$Race_Category)))
+
+tcga_vc <- tcga_vc %>% 
+  filter(Menopause_Status %in% unique(RPPA_num$Menopause_Status)) %>%
+  mutate(Menopause_Status = factor(Menopause_Status, labels = levels(RPPA_fac$Menopause_Status)))
+
+tcga_vc <- tcga_vc %>% 
+  filter(Ethnicity_Category %in% unique(RPPA_num$Ethnicity_Category)) %>%
+  mutate(Ethnicity_Category = factor(Ethnicity_Category, labels = levels(RPPA_fac$Ethnicity_Category)))
+
+tcga_vc <- tcga_vc %>% 
+  filter(Overall_Survival_Status %in% unique(RPPA_num$Overall_Survival_Status)) %>%
+  mutate(Overall_Survival_Status = factor(Overall_Survival_Status, labels = levels(RPPA_fac$Overall_Survival_Status)))
+
+tcga_vc <- tcga_vc %>% 
+  filter(Disease_Free_Status %in% unique(RPPA_num$Disease_Free_Status)) %>%
+  mutate(Disease_Free_Status = factor(Disease_Free_Status, labels = levels(RPPA_fac$Disease_Free_Status)))
+
+# Ensure synthetic dataset has the same size as original
+tcga_vc <- tcga_vc[1:N,]
+
+# Check dimensions
+dim(tcga_vc)
+```
+
+
+
+### ctGAN tcga
+
+```{r ctgan trial}
+library(reticulate)
+library(dplyr)
+
+# Import the CTGAN library from Python
+ctgan <- import("ctgan")
+# Also, assume your data is in an R data frame called 'ehr'
+# and you have a vector of discrete column names:
+discrete_columns <- c('Sex', 'Race_Category', 'Menopause_Status', 'Ethnicity_Category', 
+                      'Disease_Free_Status', 'Overall_Survival_Status')
+
+# Convert your R data frame to a Python Pandas DataFrame
+tcga_py <- r_to_py(RPPA_nona)
+
+# Define an evaluation function that wraps CTGAN with given hyperparameters
+evaluate_ctgan <- function(epochs, batch_size, generator_lr, discriminator_lr) {
+  
+  # Create a CTGAN synthesizer instance with specified hyperparameters.
+  synthesizer <- ctgan$CTGAN(epochs = as.integer(epochs),
+                             batch_size = as.integer(batch_size),
+                             generator_lr = generator_lr,
+                             discriminator_lr = discriminator_lr)
+  
+  # Fit the model to your real data
+  synthesizer$fit(tcga_py, discrete_columns)
+  
+  # Sample synthetic data; here we generate as many rows as in the real data
+  synthetic_data <- synthesizer$sample(as.integer(nrow(RPPA_nona)))
+  
+  # Convert synthetic data (a Pandas DataFrame) back to an R data frame
+  synthetic_data_r <- py_to_r(synthetic_data)
+  
+  # Evaluate quality: for demonstration, we compare the mean of a numeric column.
+  # (In practice, you may want to compute a more sophisticated quality metric.)
+  metric <- abs(mean(RPPA_nona$some_numeric_column, na.rm = TRUE) - 
+                  mean(synthetic_data_r$some_numeric_column, na.rm = TRUE))
+  
+  return(metric)
+}
+
+# Define a grid of hyperparameters to search
+epochs_values <- c(50, 100)
+batch_size_values <- c(100, 500)
+generator_lr_values <- c(0.0001, 0.0002)
+discriminator_lr_values <- c(0.0001, 0.0002)
+```
+
+
+```{r ctgan trial}
+# Create a grid of parameter combinations
+param_grid <- expand.grid(epochs = epochs_values,
+                          batch_size = batch_size_values,
+                          generator_lr = generator_lr_values,
+                          discriminator_lr = discriminator_lr_values,
+                          stringsAsFactors = FALSE)
+
+# Initialize a vector to store evaluation metrics for each combination
+param_grid$metric <- NA
+
+# Loop over each combination and evaluate CTGAN
+for (i in seq_len(nrow(param_grid))) {
+  cat("Evaluating combination", i, "of", nrow(param_grid), "\n")
+  param_grid$metric[i] <- evaluate_ctgan(
+    epochs = param_grid$epochs[i],
+    batch_size = param_grid$batch_size[i],
+    generator_lr = param_grid$generator_lr[i],
+    discriminator_lr = param_grid$discriminator_lr[i]
+  )
+}
+
+# Find the best combination (assuming lower metric indicates better quality)
+best_params <- param_grid %>% filter(metric == min(metric))
+print(best_params)
+
+
+```
+
+```{r ctGAN tcga 1, warning=FALSE, message=FALSE}
+ctGAN <- import("ctgan")
+#synthesizer <- ctGAN$synthesizers$CTGAN(epochs = 10L)
+
+
+discrete_columns_tcga <- c('Sex', 'Race_Category', 'Menopause_Status', 'Ethnicity_Category', 'Disease_Free_Status', 'Overall_Survival_Status')
+
+# Ensure categorical variables are characters (not factors)
+#ehr[discrete_columns] <- lapply(ehr[discrete_columns], as.character)
+
+# Convert the data to a Pandas DataFrame
+#ehr_py <- r_to_py(ehr)
+
+
+```
+
+
+```{r ctGAN tcga 2, warning=FALSE, message=FALSE}
+
+set.seed(123)
+
+#record time
+start_time <- Sys.time()
+
+ctgan_bc <- ctGAN$CTGAN(epochs = as.integer(1000)) # too few epochs, but with 1000 it takes around 15 min
+
+#default hyperparameters:
+#batch_size: 500
+#generator_dim: [256, 256, 256] - do some tuning on the dimenaiona, seem rather big...
+# [100, 100]
+#discriminator_dim: [256, 256, 256]
+#embedding_dim: 128
+#generator_lr: 2e-4
+#discriminator_lr: 2e-4
+
+
+synthesizer$fit(RPPA_nona, discrete_columns_tcga)
+tcga_ctgan_syn <- synthesizer$sample(841L)
+
+  #record end time
+end_time <- Sys.time()
+# Calculate the difference in time
+execution_time <- end_time - start_time
+print(execution_time)
+
+#It took around 2.5 min for 50 epochs to run 
+
+################
+#lil comment to myself - CTGAN runs when only doing the basic pre processing of the data - make sure vinecopula's dat is different to not mess with it
+# dont transform characters to factors or bring them back to characters 
+
+ctgan_bc$save("ctgan_model.pkl")
+#ctgan_bc <- ctgan$CTGANSynthesizer.load("ctgan_model.pkl")
+
+ctgan_bc$loss_values
+```
+
+```{r plot}
+
+
+########################################
+
+# Convert loss values to a data frame
+loss_df <- as.data.frame(ctgan_bc$loss_values)
+
+# Convert columns to numeric (if necessary)
+loss_df$Epoch <- as.numeric(loss_df$Epoch)
+loss_df$`Generator Loss` <- as.numeric(loss_df$`Generator Loss`)
+loss_df$`Discriminator Loss` <- as.numeric(loss_df$`Discriminator Loss`)
+
+# Plot Generator and Discriminator Loss
+ggplot(loss_df, aes(x = Epoch)) +
+  geom_line(aes(y = `Generator Loss`, color = "Generator Loss")) +
+  geom_line(aes(y = `Discriminator Loss`, color = "Discriminator Loss")) +
+  labs(title = "CTGAN Training Loss Over Epochs",
+       x = "Epoch",
+       y = "Loss",
+       color = "Loss Type") +
+  theme_minimal()
+
+```
+
+
+
+```{r hyperparameter tuning ctGAN}
+
+set.seed(123)
+
+# Import Python CTGAN library
+ctgan <- import("ctgan")
+np <- import("numpy")
+py_builtin <- import("builtins")
+
+# Assume 'ehr' is your R data frame.
+# Specify the six categorical columns.
+discrete_columns <- c('Sex', 'Race_Category', 'Menopause_Status', 'Ethnicity_Category', 'Disease_Free_Status', 'Overall_Survival_Status')
+
+
+# Convert R data frame to a Python Pandas DataFrame
+tcga_py <- r_to_py(RPPA_nona)
+
+# Automatically identify numeric columns (all columns not in discrete_columns)
+numeric_columns <- setdiff(names(RPPA_nona), discrete_columns)
+
+
+# ----- Helper Functions -----
+
+compute_tvd <- function(p, q) {
+  mat <- rbind(p, q)
+  return(as.numeric(distance(mat, method = "manhattan") / 2))
+}
+
+evaluate_tvd_cat <- function(real_vec, synth_vec) {
+  real_tab <- prop.table(table(real_vec))
+  synth_tab <- prop.table(table(synth_vec))
+  all_levels <- union(names(real_tab), names(synth_tab))
+  real_probs <- sapply(all_levels, function(x) ifelse(x %in% names(real_tab), real_tab[x], 0))
+  synth_probs <- sapply(all_levels, function(x) ifelse(x %in% names(synth_tab), synth_tab[x], 0))
+  tvd <- compute_tvd(real_probs, synth_probs)
+  return(tvd)
+}
+
+evaluate_ks <- function(real_vec, synth_vec) {
+  ks_stat <- ks.test(real_vec, synth_vec)$statistic
+  return(as.numeric(ks_stat))
+}
+
+evaluate_quality <- function(real_df, synth_df, numeric_cols, discrete_cols) {
+  ks_vals <- sapply(numeric_cols, function(col) {
+    evaluate_ks(real_df[[col]], synth_df[[col]])
+  })
+  mean_ks <- mean(ks_vals)
+  
+  tvd_vals <- sapply(discrete_cols, function(col) {
+    evaluate_tvd_cat(real_df[[col]], synth_df[[col]])
+  })
+  mean_tvd <- mean(tvd_vals)
+  
+  overall_metric <- (mean_ks + mean_tvd) / 2
+  return(overall_metric)
+}
+
+# ----- Hyperparameter Tuning Setup -----
+
+epochs_values <- c(700)
+batch_size_values <- c(100, 200)
+generator_lr_values <- c(0.0001, 0.001)
+discriminator_lr_values <- c(0.0001,0.001)
+
+generator_dim_options <- list(c(64, 64), c(128, 64))
+discriminator_dim_options <- list(c(64, 64), c(128, 64))
+embedding_dim_options <- c(64)
+
+total_iter <- length(epochs_values) * length(batch_size_values) *
+  length(generator_lr_values) * length(discriminator_lr_values) *
+  length(generator_dim_options) * length(discriminator_dim_options) *
+  length(embedding_dim_options)
+
+pb <- progress_bar$new(
+  format = "  Tuning [:bar] :percent in :elapsed",
+  total = total_iter, clear = FALSE, width = 60
+)
+
+results <- data.frame(
+  epochs = integer(),
+  batch_size = integer(),
+  generator_lr = numeric(),
+  discriminator_lr = numeric(),
+  generator_dim = character(),
+  discriminator_dim = character(),
+  embedding_dim = integer(),
+  quality_metric = numeric(),
+  loss_plot_file = character(),
+  stringsAsFactors = FALSE
+)
+
+#record time
+start_time <- Sys.time()
+
+
+for (epochs in epochs_values) {
+  for (batch_size in batch_size_values) {
+    for (g_lr in generator_lr_values) {
+      for (d_lr in discriminator_lr_values) {
+        for (gen_dim in generator_dim_options) {
+          for (disc_dim in discriminator_dim_options) {
+            for (emb_dim in embedding_dim_options) {
+              
+              cat("Tuning with epochs =", epochs,
+                  "batch_size =", batch_size,
+                  "gen_lr =", g_lr,
+                  "disc_lr =", d_lr,
+                  "gen_dim =", paste(gen_dim, collapse = "-"),
+                  "disc_dim =", paste(disc_dim, collapse = "-"),
+                  "emb_dim =", emb_dim, "\n")
+              
+              # Option: use Python builtins to create tuples.
+              py_gen_dim <- py_builtin$tuple(as.integer(gen_dim))
+              py_disc_dim <- py_builtin$tuple(as.integer(disc_dim))
+              
+              # Create the CTGAN synthesizer.
+              synthesizer <- ctgan$CTGAN(
+                epochs = as.integer(epochs),
+                batch_size = as.integer(batch_size),
+                generator_lr = g_lr,
+                discriminator_lr = d_lr,
+                generator_dim = py_gen_dim,
+                discriminator_dim = py_disc_dim,
+                embedding_dim = as.integer(emb_dim)
+              )
+              
+              # Fit the model.
+              synthesizer$fit(tcga_py, discrete_columns)
+              
+              # Optionally, you can save the loss plot for this model.
+              loss_df <- as.data.frame(synthesizer$loss_values)
+              loss_df$Epoch <- as.numeric(loss_df$Epoch)
+              loss_df$`Generator Loss` <- as.numeric(loss_df$`Generator Loss`)
+              loss_df$`Discriminator Loss` <- as.numeric(loss_df$`Discriminator Loss`)
+              plot_filename <- sprintf("ctgan_loss_epochs%d_batch%d_genlr%s_disclr%s_gendim%s_discdim%s_embdim%d.png",
+                                       epochs, batch_size, g_lr, d_lr,
+                                       paste(gen_dim, collapse = "-"),
+                                       paste(disc_dim, collapse = "-"),
+                                       emb_dim)
+              p <- ggplot(loss_df, aes(x = Epoch)) +
+                geom_line(aes(y = `Generator Loss`, color = "Generator Loss")) +
+                geom_line(aes(y = `Discriminator Loss`, color = "Discriminator Loss")) +
+                labs(title = "CTGAN Training Loss Over Epochs",
+                     x = "Epoch", y = "Loss", color = "Loss Type") +
+                theme_minimal()
+              ggsave(filename = plot_filename, plot = p, width = 8, height = 5, bg ="white")
+              
+              # Sample synthetic data.
+              synth_py <- synthesizer$sample(as.integer(nrow(RPPA_nona)))
+              synth_df <- py_to_r(synth_py)
+              
+              # Evaluate quality.
+              metric_val <- evaluate_quality(RPPA_nona, synth_df, numeric_columns, discrete_columns)
+              
+              # Append results.
+              results <- rbind(results, data.frame(
+                epochs = epochs,
+                batch_size = batch_size,
+                generator_lr = g_lr,
+                discriminator_lr = d_lr,
+                generator_dim = paste(gen_dim, collapse = "-"),
+                discriminator_dim = paste(disc_dim, collapse = "-"),
+                embedding_dim = emb_dim,
+                quality_metric = metric_val,
+                stringsAsFactors = FALSE
+              ))
+              
+              pb$tick()  # Update progress bar.
+              
+              # Save checkpoint after each inner iteration.
+              saveRDS(results, file = "results_checkpoint.rds")
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+  #record end time
+end_time <- Sys.time()
+# Calculate the difference in time
+execution_time <- end_time - start_time
+print(execution_time)
+
+print(results)
+
+best_params <- results %>% filter(quality_metric == min(quality_metric))
+cat("Best hyperparameters:\n")
+print(best_params)
+
+
+```
+The best hyperparamets given the metrics provided above show a ctGAN with epochs batch_size generator_lr discriminator_lr generator_dim discriminator_dim embedding_dim
+1    700        100        1e-04            0.001         64-64            128-64            64
+  quality_metric
+1      0.1066274. Looking at the plots though I can see that this model did not converge.Therefore the next best step, imo, to take is to runn the converging, 11, models again and compare them on the metrics provided above. 
+
+```{r hyperparameter tuning (finding the best model) ctGAN}
+
+set.seed(123)
+# Load required libraries
+library(furrr)
+library(future)
+
+# Set up parallel backend using multisession
+plan(multisession, workers = availableCores())
+
+#------------------------------
+# Define your data and columns
+#------------------------------
+# Assume RPPA_nona is your data frame.
+# Specify your six categorical columns:
+discrete_columns <- c('Sex', 'Race_Category', 'Menopause_Status', 
+                      'Ethnicity_Category', 'Disease_Free_Status', 
+                      'Overall_Survival_Status')
+
+# Identify numeric columns (all columns not in discrete_columns)
+numeric_columns <- setdiff(names(RPPA_nona), discrete_columns)
+
+#------------------------------
+# Helper Functions
+#------------------------------
+compute_tvd <- function(p, q) {
+  mat <- rbind(p, q)
+  return(as.numeric(distance(mat, method = "manhattan") / 2))
+}
+
+evaluate_tvd_cat <- function(real_vec, synth_vec) {
+  real_tab <- prop.table(table(real_vec))
+  synth_tab <- prop.table(table(synth_vec))
+  all_levels <- union(names(real_tab), names(synth_tab))
+  real_probs <- sapply(all_levels, function(x) ifelse(x %in% names(real_tab), real_tab[x], 0))
+  synth_probs <- sapply(all_levels, function(x) ifelse(x %in% names(synth_tab), synth_tab[x], 0))
+  tvd <- compute_tvd(real_probs, synth_probs)
+  return(tvd)
+}
+
+evaluate_ks <- function(real_vec, synth_vec) {
+  ks_stat <- ks.test(real_vec, synth_vec)$statistic
+  return(as.numeric(ks_stat))
+}
+
+evaluate_quality <- function(real_df, synth_df, numeric_cols, discrete_cols) {
+  ks_vals <- sapply(numeric_cols, function(col) {
+    evaluate_ks(real_df[[col]], synth_df[[col]])
+  })
+  mean_ks <- mean(ks_vals)
+  
+  tvd_vals <- sapply(discrete_cols, function(col) {
+    evaluate_tvd_cat(real_df[[col]], synth_df[[col]])
+  })
+  mean_tvd <- mean(tvd_vals)
+  
+  overall_metric <- (mean_ks + mean_tvd) / 2
+  return(overall_metric)
+}
+
+#------------------------------
+# Define Allowed Hyperparameter Configurations
+#------------------------------
+# We create a data frame with the 11 configurations that converged.
+allowed_params <- data.frame(
+  epochs = rep(700, 11),
+  batch_size = c(rep(100, 6), rep(200, 5)),
+  generator_lr = c(0.001, 0.001, 0.001, 0.001, 0.0001, 0.0001,
+                   0.001, 0.001, 0.001, 0.001, 0.0001),
+  discriminator_lr = rep(0.0001, 11),
+  embedding_dim = rep(64, 11),
+  # For generator_dim and discriminator_dim we store them as list columns.
+  generator_dim = I(list( c(64,64),  # config 1
+                           c(64,64),  # config 2: same as config 1 for gen, differing in disc below
+                           c(128,64), # config 3
+                           c(128,64), # config 4
+                           c(128,64), # config 5 (with lower gen_lr)
+                           c(128,64), # config 6
+                           c(64,64),  # config 7 (batch 200)
+                           c(64,64),  # config 8
+                           c(128,64), # config 9
+                           c(128,64), # config 10
+                           c(128,64)  # config 11 (with lower gen_lr)
+  )),
+  discriminator_dim = I(list( c(64,64),   # config 1
+                              c(128,64),  # config 2
+                              c(64,64),   # config 3
+                              c(128,64),  # config 4
+                              c(64,64),   # config 5
+                              c(128,64),  # config 6
+                              c(64,64),   # config 7
+                              c(128,64),  # config 8
+                              c(64,64),   # config 9
+                              c(128,64),  # config 10
+                              c(64,64)    # config 11
+  )),
+  stringsAsFactors = FALSE
+)
+
+#------------------------------
+# Parallel Processing Using furrr::future_map
+#------------------------------
+# Define a function that processes one row of allowed_params:
+process_config <- function(i) {
+  # Import Python modules in the worker
+  ctgan <- import("ctgan")
+  py_builtin <- import_builtins()
+  np <- import("numpy")
+  
+  # Extract parameters from allowed_params row i.
+  row <- allowed_params[i, ]
+  epochs <- row$epochs
+  batch_size <- row$batch_size
+  g_lr <- row$generator_lr
+  d_lr <- row$discriminator_lr
+  emb_dim <- row$embedding_dim
+  
+  gen_dim <- row$generator_dim[[1]]
+  disc_dim <- row$discriminator_dim[[1]]
+  
+  # Re-create the Python object for the data in each worker.
+  tcga_py <- r_to_py(RPPA_nona)
+  
+  # Convert dimensions to Python tuples.
+  py_gen_dim <- py_builtin$tuple(as.integer(gen_dim))
+  py_disc_dim <- py_builtin$tuple(as.integer(disc_dim))
+  
+  # Create and train the CTGAN model.
+  synthesizer <- ctgan$CTGAN(
+    epochs = as.integer(epochs),
+    batch_size = as.integer(batch_size),
+    generator_lr = g_lr,
+    discriminator_lr = d_lr,
+    generator_dim = py_gen_dim,
+    discriminator_dim = py_disc_dim,
+    embedding_dim = as.integer(emb_dim)
+  )
+  synthesizer$fit(tcga_py, discrete_columns)
+  
+  # Save the loss plot.
+  loss_df <- as.data.frame(synthesizer$loss_values)
+  loss_df$Epoch <- as.numeric(loss_df$Epoch)
+  loss_df$`Generator Loss` <- as.numeric(loss_df$`Generator Loss`)
+  loss_df$`Discriminator Loss` <- as.numeric(loss_df$`Discriminator Loss`)
+  plot_filename <- sprintf("ctgan_loss_epochs%d_batch%d_genlr%s_disclr%s_gendim%s_discdim%s_embdim%d.png",
+                           epochs, batch_size, g_lr, d_lr,
+                           paste(gen_dim, collapse = "-"),
+                           paste(disc_dim, collapse = "-"),
+                           emb_dim)
+  p <- ggplot(loss_df, aes(x = Epoch)) +
+    geom_line(aes(y = `Generator Loss`, color = "Generator Loss")) +
+    geom_line(aes(y = `Discriminator Loss`, color = "Discriminator Loss")) +
+    labs(title = "CTGAN Training Loss Over Epochs",
+         x = "Epoch", y = "Loss", color = "Loss Type") +
+    theme_minimal() +
+    theme(plot.background = element_rect(fill = "white", color = NA))
+  ggsave(filename = plot_filename, plot = p, width = 8, height = 5, bg ="white")
+  
+  # Generate synthetic data.
+  synth_py <- synthesizer$sample(as.integer(nrow(RPPA_nona)))
+  synth_df <- py_to_r(synth_py)
+  
+  # Evaluate quality.
+  metric_val <- evaluate_quality(RPPA_nona, synth_df, numeric_columns, discrete_columns)
+  
+  # Return the configuration and metric.
+  data.frame(
+    epochs = epochs,
+    batch_size = batch_size,
+    generator_lr = g_lr,
+    discriminator_lr = d_lr,
+    generator_dim = paste(gen_dim, collapse = "-"),
+    discriminator_dim = paste(disc_dim, collapse = "-"),
+    embedding_dim = emb_dim,
+    quality_metric = metric_val,
+    loss_plot_file = plot_filename,
+    stringsAsFactors = FALSE
+  )
+}
+
+# Record start time.
+start_time <- Sys.time()
+
+# Process each configuration in parallel.
+results_list <- future_map(1:nrow(allowed_params), process_config, .options = furrr_options(seed = TRUE))
+results_df <- bind_rows(results_list)
+
+# Record end time and execution time.
+end_time <- Sys.time()
+execution_time <- end_time - start_time
+print(execution_time)
+print(results_df)
+
+# Identify the best hyperparameters (lowest overall quality metric).
+best_params <- results_df %>% filter(quality_metric == min(quality_metric))
+cat("Best hyperparameters:\n")
+print(best_params)
+
+#------------------------------
+# Re-run CTGAN with Best Hyperparameters and Save Synthetic Data
+#------------------------------
+# Extract the best configuration.
+best <- best_params[1, ]  # in case there are ties, take the first one.
+# Convert best configuration to the appropriate formats:
+best_gen_dim <- best$generator_dim
+best_disc_dim <- best$discriminator_dim
+
+# Split the strings to recover the numeric vectors.
+best_gen_dim_vec <- as.integer(unlist(strsplit(best_gen_dim, "-")))
+best_disc_dim_vec <- as.integer(unlist(strsplit(best_disc_dim, "-")))
+
+# Convert to Python tuples using builtins.
+py_best_gen_dim <- py_builtin$tuple(best_gen_dim_vec)
+py_best_disc_dim <- py_builtin$tuple(best_disc_dim_vec)
+
+# Re-create the Python object for data.
+tcga_py_best <- r_to_py(RPPA_nona)
+
+# Train a final CTGAN model with the best hyperparameters.
+best_synthesizer <- ctgan$CTGAN(
+  epochs = as.integer(best$epochs),
+  batch_size = as.integer(best$batch_size),
+  generator_lr = best$generator_lr,
+  discriminator_lr = best$discriminator_lr,
+  generator_dim = py_best_gen_dim,
+  discriminator_dim = py_best_disc_dim,
+  embedding_dim = as.integer(best$embedding_dim)
+)
+
+best_synthesizer$fit(tcga_py_best, discrete_columns)
+
+# Generate and save the loss plot for the best model
+loss_df <- as.data.frame(best_synthesizer$loss_values)
+loss_df$Epoch <- as.numeric(loss_df$Epoch)
+loss_df$`Generator Loss` <- as.numeric(loss_df$`Generator Loss`)
+loss_df$`Discriminator Loss` <- as.numeric(loss_df$`Discriminator Loss`)
+
+final_plot_filename <- sprintf("final_ctgan_loss_epochs%d_batch%d_genlr%s_disclr%s_gendim%s_discdim%s_embdim%d.png",
+                           best_params$epochs[1],
+                           best_params$batch_size[1],
+                           best_params$generator_lr[1],
+                           best_params$discriminator_lr[1],
+                           best_params$generator_dim[1],
+                           best_params$discriminator_dim[1],
+                           best_params$embedding_dim[1])
+best_ctgan_loss <- ggplot(loss_df, aes(x = Epoch)) +
+  geom_line(aes(y = `Generator Loss`, color = "Generator Loss")) +
+  geom_line(aes(y = `Discriminator Loss`, color = "Discriminator Loss")) +
+  labs(title = "Final CTGAN Training Loss Over Epochs",
+       x = "Epoch", y = "Loss", color = "Loss Type") +
+  theme_minimal() +
+  theme(plot.background = element_rect(fill = "white", color = NA))
+ggsave(filename = final_plot_filename, plot = p, width = 8, height = 5, bg = "white")
+
+# Generate synthetic data from the best model.
+tcga_ctgan2 <- best_synthesizer$sample(as.integer(nrow(RPPA_nona)))
+#final_synth_df <- py_to_r(final_synth_py)
+
+# Save the synthetic data to a CSV file.
+#write.csv(final_synth_df, "best_synthetic_data.csv", row.names = FALSE)
+
+#cat("Synthetic data from best hyperparameters saved as 'best_synthetic_data.csv'.\n")
+
+
+```
+
+
+```{r the best ctGAN model}
+
+set.seed(123)
+
+#------------------------------
+# Re-run Best Model to Save Synthetic Data
+#------------------------------# Specify the six categorical columns.
+discrete_columns <- c('Sex', 'Race_Category', 'Menopause_Status', 
+                      'Ethnicity_Category', 'Disease_Free_Status', 
+                      'Overall_Survival_Status')
+
+
+best_epochs <- 700
+best_batch_size <- 200
+best_generator_lr <- 1e-04
+best_discriminator_lr <- 1e-04
+best_embedding_dim <- 64
+
+# Define the best network dimensions.
+best_generator_dim <- c(128, 64)
+best_discriminator_dim <- c(64, 64)
+
+# Convert the network dimension vectors to Python tuples.
+py_best_generator_dim <- py_builtin$tuple(as.integer(best_generator_dim))
+py_best_discriminator_dim <- py_builtin$tuple(as.integer(best_discriminator_dim))
+
+# Re-create the Python object for your data.
+ tcga_py <- r_to_py(RPPA_nona)
+
+# Initialize and train the final CTGAN model with the best hyperparameters.
+best_synthesizer <- ctgan$CTGAN(
+  epochs = as.integer(best_epochs),
+  batch_size = as.integer(best_batch_size),
+  generator_lr = best_generator_lr,
+  discriminator_lr = best_discriminator_lr,
+  generator_dim = py_best_generator_dim,
+  discriminator_dim = py_best_discriminator_dim,
+  embedding_dim = as.integer(best_embedding_dim)
+)
+
+# Train the model (using your defined discrete columns).
+best_synthesizer$fit(tcga_py, discrete_columns)
+
+# Sample synthetic data: generate as many rows as in your original data.
+tcga_ctgan2 <- best_synthesizer$sample(as.integer(nrow(RPPA_nona)))
+
+
+#loss plot
+
+# Convert loss values to a data frame
+loss_df <- as.data.frame(best_synthesizer$loss_values)
+
+# Convert columns to numeric (if necessary)
+loss_df$Epoch <- as.numeric(loss_df$Epoch)
+loss_df$`Generator Loss` <- as.numeric(loss_df$`Generator Loss`)
+loss_df$`Discriminator Loss` <- as.numeric(loss_df$`Discriminator Loss`)
+
+# Plot Generator and Discriminator Loss
+ggplot(loss_df, aes(x = Epoch)) +
+  geom_line(aes(y = `Generator Loss`, color = "Generator Loss")) +
+  geom_line(aes(y = `Discriminator Loss`, color = "Discriminator Loss")) +
+  labs(title = "CTGAN Training Loss Over Epochs",
+       x = "Epoch",
+       y = "Loss",
+       color = "Loss Type") 
+  theme_minimal()
+```
+
+
+#############################################################################################
+
+

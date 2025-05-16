@@ -1,0 +1,791 @@
+---
+title: "thesis"
+author: "Laura Jochim"
+date: "2025-03-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loading packages, message=FALSE, warning=FALSE}
+#load packages
+
+library(tidyverse)
+library(rvinecopulib)
+library(kde1d)
+library(reticulate)
+library(synthpop)
+library(utils)
+library(pryr)
+library(dplyr)
+library(progressr)
+library(gplots)
+library(glmnet)
+library(purrr)
+library(caret)
+library(ggplot2)
+library(philentropy)
+library(progress)
+
+#set virtual environment
+reticulate::use_condaenv("thesis", required = T) 
+```
+
+This file aims to have a first exploration stage of the EHR from Figshare and later on the TCGA Breastcancer data . First we will take a look of how the data looks like, do some data cleaning and processing if needed and then dive into synthesizing it using three methods, namely: synthpop, CtGAN, and vine copulas. Lastly, we will dive into the evaluation of the synthetic data, and how well these evaluation methods tell us how good the synthetic data is. In this project we will only focus on the utility of the synthetic data, privacy which is also something to evaluate the synthetic data on will not be part of the evaluation. 
+
+
+# EHR 10.000 patient data
+
+### Cleaning up the data
+```{r}
+#load the data
+lab_data <- readr::read_delim("data/10000-Patients (2)/LabsCorePopulatedTable.txt")
+pat_data <- readr::read_delim("data/10000-Patients (2)/PatientCorePopulatedTable.txt")
+diag_data <- readr::read_delim("data/10000-Patients (2)/AdmissionsDiagnosesCorePopulatedTable.txt")
+adm_data <- readr::read_delim("data/10000-Patients (2)/AdmissionsCorePopulatedTable.txt")
+
+ls()
+pryr::mem_used()
+
+```
+
+```{r}
+### Preprocess data ######
+## Lab values; only take last measurement per patient; 
+lab_data <- lab_data %>% group_by(PatientID, AdmissionID, LabName) %>% 
+  filter(LabDateTime == max(LabDateTime))
+pryr::mem_used()
+
+## Create ID column for outcome and admission data
+diag_data <- diag_data %>% unite(ID, c("PatientID", "AdmissionID"), remove = FALSE)
+adm_data <- adm_data%>% unite(ID, c("PatientID", "AdmissionID"), remove = FALSE)
+lab_data <- lab_data %>% unite(ID, c("PatientID", "AdmissionID"), remove = FALSE)
+
+## Construct outome
+diag_data <- diag_data %>% mutate(outcome = str_detect(PrimaryDiagnosisDescription, 
+                                                     regex("Malignant neoplasm", ignore_case = TRUE)))
+
+diag_data$outcome <- diag_data$outcome %>% ifelse(yes = "case", no = "control") %>% as.factor
+
+## Join all data
+dat <- inner_join(diag_data, adm_data)
+dat <- inner_join(dat, lab_data)
+dat <- inner_join(dat, pat_data)
+
+## Drop PatientID
+dat <- dat %>% select(-PatientID)
+
+## Take first admission; 
+dat <- dat %>% filter(AdmissionID == 1)
+
+
+## Convert to wide format; put each blood marker in own column
+dat <- dat %>% select(-LabUnits, -LabDateTime) %>% 
+  pivot_wider(names_from = LabName, values_from = LabValue)
+
+## Set all 'irregular' lab marker names to underscore
+names(dat) <- names(dat) %>% str_replace_all(" ", "_") %>% 
+  str_replace_all(":", "") %>% str_replace_all("/", "_")
+
+## Define Patient age and length of stay
+dat <- dat %>% mutate(PatientAge = interval(PatientDateOfBirth, AdmissionStartDate) / dyears(1))
+dat <- dat %>% mutate(PatientLOS = interval(AdmissionStartDate, AdmissionEndDate) / ddays(1))
+
+## Reorder columns and take only complete cases
+dat <- dat %>% select(order(names(dat))) %>% select(-starts_with("Admission"))
+dat <- dat %>% relocate(ID, outcome, starts_with("Patient"))
+dat <- dat %>% filter(complete.cases((dat)))
+table(dat$outcome)
+
+## A list of blood markers and their units
+lab_data %>% ungroup %>% select(LabName, LabUnits) %>% 
+  distinct(LabName, .keep_all = TRUE) %>% arrange(LabName) %>% print(n=50)
+
+#################################################
+
+# extra adjustemtn of the data for synthesizing
+
+#remove the ID row becuase it does not make sense to inlcude for synthetic data
+ehr <- dat%>% select(-ID)
+##drop Admission ID
+#ehr <- ehr %>% select(-AdmissionID)
+#same goes for PrimaryDiagnosisCode and PrimaryDiagnosisDescription because they are individual for each patient
+ehr <- ehr %>% select(-c(PrimaryDiagnosisCode, PrimaryDiagnosisDescription))
+#also remove URINALYSIS_SPECIFIC_GRAVITY, because it only has '1'
+ehr <- ehr %>% select(-URINALYSIS_SPECIFIC_GRAVITY)
+#transform the PatientDateOfBirth variable to exlcude time stamp
+ehr <- ehr %>%
+  mutate(PatientDateOfBirth = as.Date(PatientDateOfBirth)) 
+
+
+
+#(#apperently we are running into trouble with the PatientDateOfBirth becuase they do not match From synthetic  5373  from original  7867
+#length(unique(ehr$PatientDateOfBirth))
+#length(unique(ehr_synthpop$syn$PatientDateOfBirth))
+
+#the synthesis process might have collapsed date values into a smaller set.
+#I tried fixing it by doing this:
+#ehr_synthpop <- syn(ehr, method = c(PatientDateOfBirth = "normrank"))
+#or this:
+#ehr_synthpop <- syn(ehr, method = c(PatientDateOfBirth = "cart"))
+#but none fixed the problem
+#my solution for now is just to delete the variable and rerun)
+
+#delete PatientDateOfBirth
+ehr <- ehr %>% select(-PatientDateOfBirth)
+
+# make "CBC_BASOPHILS" discrete becuase it only has three levels
+ehr <- ehr %>% mutate(CBC_BASOPHILS = as.character(CBC_BASOPHILS))
+
+```
+
+```{r}
+#take a look at the data summary
+summary(ehr)
+
+#heatmap
+my_limit <- 0.2
+hm.2 <- function(obj){
+  try(
+    heatmap.2(obj,Rowv=F,symm=T,col=colorRampPalette(c("brown","white","yellow"))(25),
+              dendrogram='none'
+              ,main = "Heatmap of Original EHR Data"
+              ,trace='none'
+              ,labRow = F
+              ,labCol = F
+              ,symkey=TRUE, breaks=seq(-my_limit, my_limit,length=26),
+              key = T), silent = TRUE)
+}  
+
+# define discrete and continuous variables
+var_types <- c(
+  "d",  # outcome (factor)
+  "c",  # PatientAge (numeric)
+  "d",  # PatientGender (factor)
+  "d",  # PatientLanguage (factor)
+  "c",  # PatientLOS (numeric)
+  "d",  # PatientMaritalStatus (factor)
+  "c",  # PatientPopulationPercentageBelowPoverty (numeric)
+  "d",  # PatientRace (factor)
+  "c",  # CBC_ABSOLUTE_LYMPHOCYTES (numeric)
+  "c",  # CBC_ABSOLUTE_NEUTROPHILS (numeric)
+  "d",  # CBC_BASOPHILS (factor)
+  "c",  # CBC_EOSINOPHILS (numeric)
+  "c",  # CBC_HEMATOCRIT (numeric)
+  "c",  # CBC_HEMOGLOBIN (numeric)
+  "c",  # CBC_LYMPHOCYTES (numeric)
+  "c",  # CBC_MCH (numeric)
+  "c",  # CBC_MCHC (numeric)
+  "c",  # CBC_MEAN_CORPUSCULAR_VOLUME (numeric)
+  "c",  # CBC_MONOCYTES (numeric)
+  "c",  # CBC_NEUTROPHILS (numeric)
+  "c",  # CBC_PLATELET_COUNT (numeric)
+  "c",  # CBC_RDW (numeric)
+  "c",  # CBC_RED_BLOOD_CELL_COUNT (numeric)
+  "c",  # CBC_WHITE_BLOOD_CELL_COUNT (numeric)
+  "c",  # METABOLIC_ALBUMIN (numeric)
+  "c",  # METABOLIC_ALK_PHOS (numeric)
+  "c",  # METABOLIC_ALT_SGPT (numeric)
+  "c",  # METABOLIC_ANION_GAP (numeric)
+  "c",  # METABOLIC_AST_SGOT (numeric)
+  "c",  # METABOLIC_BILI_TOTAL (numeric)
+  "c",  # METABOLIC_BUN (numeric)
+  "c",  # METABOLIC_CALCIUM (numeric)
+  "c",  # METABOLIC_CARBON_DIOXIDE (numeric)
+  "c",  # METABOLIC_CHLORIDE (numeric)
+  "c",  # METABOLIC_CREATININE (numeric)
+  "c",  # METABOLIC_GLUCOSE (numeric)
+  "c",  # METABOLIC_POTASSIUM (numeric)
+  "c",  # METABOLIC_SODIUM (numeric)
+  "c",  # METABOLIC_TOTAL_PROTEIN (numeric)
+  "c",  # URINALYSIS_PH (numeric)
+  "c",  # URINALYSIS_RED_BLOOD_CELLS (numeric)
+  "c"   # URINALYSIS_WHITE_BLOOD_CELLS (numeric)
+)
+
+ehr[which(var_types %in% "c")] %>% cor %>% hm.2 
+```
+
+Now we have a nicely cleaned data, thank you Said, to work with. Each row represents an individual and each column a variable the patient was measured on, e.g. age, race, red blood cell count, white blood cell count, platelet count etc... 
+It is important to note yet again that also this electronic health care record of 10.000 parients is a syntesized and not real one. The following step will inlcude synthesizing data based on this EHR.
+
+## Synthesizing data
+In this step I will dive into the process of synthesizing data using three methods, `synthpop`, `vinecopula`, and `ctGAN`. 
+
+### Synthpop
+First I will start with the synthpop method: (describe a bit what synthpop does)
+
+
+```{r synthpop, message= F, warning=FALSE}
+
+#set seed for reproducabulity
+set.seed(123)
+
+
+#change characters into factors
+ehr_fac <- ehr %>%
+  mutate(across(where(is.character), as.factor))
+
+#create synthetic data using synthpop
+  #record time
+start_time <- Sys.time()
+
+ehr_synthpop <- synthpop::syn(ehr_fac)
+
+  #record end time
+end_time <- Sys.time()
+# Calculate the difference in time
+execution_time <- end_time - start_time
+print(execution_time)
+#it took around 40 seconds to run synthpop
+
+#get a bit of an idea of the data
+summary(ehr_synthpop)
+View(ehr_synthpop$syn)
+#GGally::ggpairs(data.frame(ehr_synthpop$syn))
+
+```
+Successful synthetic data obtained using synthpop:) Unfortunately for now the birthdate is removed. Above there are a plots comparing the frequencies of the values of each variable for the original and generated data along with the standardized propensity score measure. The plots show that the original and synthetic data look rather real. 
+
+
+### Vine Copula
+```{r vine copula 1, message=F, warning=FALSE}
+source("https://raw.githubusercontent.com/selbouhaddani/copula_vps/refs/heads/main/scripts/functions/estimate_vinecopula_from_data.R")
+
+#check the levels of the categorical variables
+
+levels(ehr_fac$PatientGender) 
+levels(ehr_fac$PatientLanguage)  
+levels(ehr_fac$PatientMaritalStatus) 
+levels(ehr_fac$PatientRace)  
+levels(ehr_fac$outcome)
+
+#
+ehr_fac <- ehr %>%
+  mutate(across(where(is.character), as.factor)) %>%
+  mutate(CBC_BASOPHILS = as.factor(CBC_BASOPHILS))
+ehr_fac <- ehr_fac %>% 
+  mutate(across(where(is.factor), \(x) factor(x, levels = x %>% table %>% sort(decreasing = TRUE) %>% names)))
+
+
+# re-code factors into numerical variables
+ehr_num <- ehr_fac %>%
+  mutate(
+    outcome = as.numeric(outcome),  
+    PatientGender = as.numeric(PatientGender),  
+    PatientLanguage = as.numeric(PatientLanguage),  
+    PatientMaritalStatus = as.numeric(PatientMaritalStatus),  
+    PatientRace = as.numeric(PatientRace),
+    CBC_BASOPHILS = as.numeric(CBC_BASOPHILS)
+  )
+
+
+
+#transform tibble to data frame
+#ehr_4vc <- as.data.frame(ehr_4vc)
+
+# define discrete and continuous variables
+var_types <- c(
+  "d",  # outcome (factor)
+  "c",  # PatientAge (numeric)
+  "d",  # PatientGender (factor)
+  "d",  # PatientLanguage (factor)
+  "c",  # PatientLOS (numeric)
+  "d",  # PatientMaritalStatus (factor)
+  "c",  # PatientPopulationPercentageBelowPoverty (numeric)
+  "d",  # PatientRace (factor)
+  "c",  # CBC_ABSOLUTE_LYMPHOCYTES (numeric)
+  "c",  # CBC_ABSOLUTE_NEUTROPHILS (numeric)
+  "d",  # CBC_BASOPHILS (factor)
+  "c",  # CBC_EOSINOPHILS (numeric)
+  "c",  # CBC_HEMATOCRIT (numeric)
+  "c",  # CBC_HEMOGLOBIN (numeric)
+  "c",  # CBC_LYMPHOCYTES (numeric)
+  "c",  # CBC_MCH (numeric)
+  "c",  # CBC_MCHC (numeric)
+  "c",  # CBC_MEAN_CORPUSCULAR_VOLUME (numeric)
+  "c",  # CBC_MONOCYTES (numeric)
+  "c",  # CBC_NEUTROPHILS (numeric)
+  "c",  # CBC_PLATELET_COUNT (numeric)
+  "c",  # CBC_RDW (numeric)
+  "c",  # CBC_RED_BLOOD_CELL_COUNT (numeric)
+  "c",  # CBC_WHITE_BLOOD_CELL_COUNT (numeric)
+  "c",  # METABOLIC_ALBUMIN (numeric)
+  "c",  # METABOLIC_ALK_PHOS (numeric)
+  "c",  # METABOLIC_ALT_SGPT (numeric)
+  "c",  # METABOLIC_ANION_GAP (numeric)
+  "c",  # METABOLIC_AST_SGOT (numeric)
+  "c",  # METABOLIC_BILI_TOTAL (numeric)
+  "c",  # METABOLIC_BUN (numeric)
+  "c",  # METABOLIC_CALCIUM (numeric)
+  "c",  # METABOLIC_CARBON_DIOXIDE (numeric)
+  "c",  # METABOLIC_CHLORIDE (numeric)
+  "c",  # METABOLIC_CREATININE (numeric)
+  "c",  # METABOLIC_GLUCOSE (numeric)
+  "c",  # METABOLIC_POTASSIUM (numeric)
+  "c",  # METABOLIC_SODIUM (numeric)
+  "c",  # METABOLIC_TOTAL_PROTEIN (numeric)
+  "c",  # URINALYSIS_PH (numeric)
+  "c",  # URINALYSIS_RED_BLOOD_CELLS (numeric)
+  "c"   # URINALYSIS_WHITE_BLOOD_CELLS (numeric)
+)
+```
+
+
+```{r vine copula 2, message=F, warning=FALSE}
+set.seed(123)
+
+#record time
+start_time <- Sys.time()  
+
+cat("Starting...\n")
+print(start_time)
+ system.time({fit_vc <- estimate_vinecopula_from_data(ehr_num[1:500,], var_types = var_types)})
+## 25 min
+cat("Ending...\n")
+print(Sys.time() - start_time)
+print(Sys.time())
+
+N <- nrow(ehr_num)
+
+#load("fit_vc_9500_20250325.RData")
+
+ehr_vc <- simulate.estVineCopula(fit_vc, 1.5*N)
+```
+```{r look at vine copula, message=F, warning=FALSE}
+#contour plots of the pair copulas
+contour(fit_vc$vine_copula)
+
+#the R-vine diagram
+plot(fit_vc$vine_copula)
+
+#count of which density was used how many times to estimate the joint distribution
+table(unlist(lapply(fit_vc$vine_copula$pair_copulas, function(inner_list) {
+  sapply(inner_list, function(x) x$family)
+})))
+
+
+```
+
+
+```{r vine copula 3, message=F, warning=FALSE}
+
+
+#transform the categorical columns back the original categories
+ehr_vc <- ehr_vc %>% filter(PatientGender %in% unique(ehr_num$PatientGender)) %>%
+  mutate(PatientGender = factor(PatientGender, labels = levels(ehr_fac$PatientGender)))
+
+ehr_vc <- ehr_vc %>% filter(PatientLanguage %in% unique(ehr_num$PatientLanguage)) %>%
+  mutate(PatientLanguage = factor(PatientLanguage, labels = levels(ehr_fac$PatientLanguage)))
+
+ehr_vc <- ehr_vc %>% filter(PatientMaritalStatus %in% unique(ehr_num$PatientMaritalStatus)) %>%
+  mutate(PatientMaritalStatus = factor(PatientMaritalStatus, labels = levels(ehr_fac$PatientMaritalStatus)))
+
+ehr_vc <- ehr_vc %>% filter(PatientRace %in% unique(ehr_num$PatientRace)) %>%
+  mutate(PatientRace = factor(PatientRace, labels = levels(ehr_fac$PatientRace)))
+
+ehr_vc <- ehr_vc %>% filter(outcome %in% unique(ehr_num$outcome)) %>%
+  mutate(outcome = factor(outcome, labels = levels(ehr_fac$outcome)))
+
+ehr_vc <- ehr_vc %>% filter(CBC_BASOPHILS %in% unique(ehr_num$CBC_BASOPHILS)) %>%
+  mutate(CBC_BASOPHILS = factor(CBC_BASOPHILS, labels = levels(ehr_fac$CBC_BASOPHILS)))
+
+ehr_vc <- ehr_vc[1:N,]
+dim(ehr_vc)
+
+
+```
+
+
+### ctGAN
+```{r ctGAN 1, warning=FALSE, message=FALSE}
+ctGAN <- import("ctgan")
+
+
+discrete_columns <- c('outcome', 'PatientGender', 'PatientLanguage', 'PatientMaritalStatus', 'PatientRace', 'CBC_BASOPHILS')
+
+# Ensure categorical variables are characters (not factors)
+#ehr[discrete_columns] <- lapply(ehr[discrete_columns], as.character)
+
+# Convert the data to a Pandas DataFrame
+#ehr_py <- r_to_py(ehr)
+
+
+```
+
+
+```{r ctGAN 2, warning=FALSE, message=FALSE}
+
+set.seed(123)
+
+#record time
+start_time <- Sys.time()
+
+ctgan_700 <- ctGAN$CTGAN(epochs = as.integer(700)) # too few epochs, but with 50 it takes around 3 minutes ~ so I expect 500 to take around 30 min
+
+#default hyperparameters:
+#batch_size: 500
+#generator_dim: [256, 256, 256]
+#discriminator_dim: [256, 256, 256]
+#embedding_dim: 128
+#generator_lr: 2e-4
+#discriminator_lr: 2e-4
+
+
+ctgan_700$fit(ehr, discrete_columns)
+ehr_ctgan_700 <- ctgan_700$sample(9662L)
+
+  #record end time
+end_time <- Sys.time()
+# Calculate the difference in time
+execution_time <- end_time - start_time
+print(execution_time)
+
+#It took around 2.5 hours to run 
+ctgan_700$save("ctgan_model.pkl")
+#ctgan_bc <- ctgan$CTGANSynthesizer.load("ctgan_model.pkl")
+
+ctgan_700$loss_values
+################
+#lil comment to myself - CTGAN runs when only doing the basic pre processing of the data - make sure vinecopula's dat is different to not mess with it
+# dont transform characters to factors or bring them back to characters 
+```
+
+```{r plot}
+
+
+########################################
+
+# Convert loss values to a data frame
+loss_df <- as.data.frame(ctgan_700$loss_values)
+
+# Convert columns to numeric (if necessary)
+loss_df$Epoch <- as.numeric(loss_df$Epoch)
+loss_df$`Generator Loss` <- as.numeric(loss_df$`Generator Loss`)
+loss_df$`Discriminator Loss` <- as.numeric(loss_df$`Discriminator Loss`)
+
+# Plot Generator and Discriminator Loss
+ggplot(loss_df, aes(x = Epoch)) +
+  geom_line(aes(y = `Generator Loss`, color = "Generator Loss")) +
+  geom_line(aes(y = `Discriminator Loss`, color = "Discriminator Loss")) +
+  labs(title = "CTGAN Training Loss Over Epochs",
+       x = "Epoch",
+       y = "Loss",
+       color = "Loss Type") +
+  theme_minimal()
+
+```
+#####################################################################
+
+```{r hyperparameter-tuning-ctgan_ehr, message=FALSE, warning=FALSE}
+# Set the seed for reproducibility
+set.seed(123)
+
+#------------------------------
+# Load Required Libraries
+#------------------------------
+library(future)
+library(furrr)
+library(dplyr)
+library(philentropy)
+library(ggplot2)
+
+# Import Python CTGAN library
+ctgan <- import("ctgan")
+np <- import("numpy")
+py_builtin <- import("builtins")
+
+# Set up parallel backend using multisession with available cores.
+plan(multisession, workers = availableCores())
+
+
+# Specify the six categorical columns.
+discrete_columns_ehr <- c('outcome', 
+                          'PatientGender', 
+                          'PatientLanguage', 
+                          'PatientMaritalStatus', 
+                          'PatientRace', 
+                          'CBC_BASOPHILS')
+
+
+# Automatically identify numeric columns (all columns not in discrete_columns_ehr)
+numeric_columns_ehr <- setdiff(names(ehr), discrete_columns_ehr)
+
+# Convert data to Python object (will re-create within each worker later; keeping it here for reference)
+py_ehr <- r_to_py(ehr)
+
+#------------------------------
+# Helper Functions (Renamed with _ehr)
+#------------------------------
+compute_tvd <- function(p, q) {
+  mat <- rbind(p, q)
+  return(as.numeric(distance(mat, method = "manhattan") / 2))
+}
+
+evaluate_tvd_cat <- function(real_vec, synth_vec) {
+  real_tab <- prop.table(table(real_vec))
+  synth_tab <- prop.table(table(synth_vec))
+  all_levels <- union(names(real_tab), names(synth_tab))
+  real_probs <- sapply(all_levels, function(x) ifelse(x %in% names(real_tab), real_tab[x], 0))
+  synth_probs <- sapply(all_levels, function(x) ifelse(x %in% names(synth_tab), synth_tab[x], 0))
+  tvd <- compute_tvd(real_probs, synth_probs)
+  return(tvd)
+}
+
+evaluate_ks <- function(real_vec, synth_vec) {
+  ks_stat <- ks.test(real_vec, synth_vec)$statistic
+  return(as.numeric(ks_stat))
+}
+
+evaluate_quality <- function(real_df, synth_df, numeric_cols, discrete_cols) {
+  ks_vals <- sapply(numeric_cols, function(col) {
+    evaluate_ks(real_df[[col]], synth_df[[col]])
+  })
+  mean_ks <- mean(ks_vals)
+  
+  tvd_vals <- sapply(discrete_cols, function(col) {
+    evaluate_tvd_cat(real_df[[col]], synth_df[[col]])
+  })
+  mean_tvd <- mean(tvd_vals)
+  
+  overall_metric <- (mean_ks + mean_tvd) / 2
+  return(overall_metric)
+}
+
+
+#------------------------------
+# Hyperparameter Tuning Setup (Create Parameter Grid)
+#------------------------------
+epochs_values <- c(700)
+batch_size_values <- c(100, 200)
+generator_lr_values <- c(0.0001, 0.001)
+discriminator_lr_values <- c(0.0001,0.001)
+
+generator_dim_options <- list(c(64, 64), c(128, 64))
+discriminator_dim_options <- list(c(64, 64), c(128, 64))
+embedding_dim_options <- c(64)
+
+# Compute total iterations (for progress later, if desired).
+total_iter <- length(epochs_values) * length(batch_size_values) *
+  length(generator_lr_values) * length(discriminator_lr_values) *
+  length(generator_dim_options) * length(discriminator_dim_options) *
+  length(embedding_dim_options)
+
+# Instead of nested loops, create a parameter grid data frame.
+# (Here we use expand.grid for scalars and then add the list-valued dimensions.)
+
+param_grid <- expand.grid(
+  epochs = epochs_values,
+  batch_size = batch_size_values,
+  generator_lr = generator_lr_values,
+  discriminator_lr = discriminator_lr_values,
+  embedding_dim = embedding_dim_options,
+  stringsAsFactors = FALSE
+)
+
+# Expand grid for generator_dim (list column)
+param_grid$generator_dim <- list(generator_dim_options[[1]])
+param_grid <- param_grid[rep(seq_len(nrow(param_grid)), each = length(generator_dim_options)), ]
+param_grid$generator_dim <- rep(generator_dim_options, times = nrow(param_grid) / length(generator_dim_options))
+
+# Expand grid for discriminator_dim (list column)
+param_grid$discriminator_dim <- discriminator_dim_options[[1]]
+param_grid <- param_grid[rep(seq_len(nrow(param_grid)), each = length(discriminator_dim_options)), ]
+param_grid$discriminator_dim <- rep(discriminator_dim_options, times = nrow(param_grid) / length(discriminator_dim_options))
+
+# ------------------------------
+
+#------------------------------
+# Parallel Processing Using future_map
+#------------------------------
+#------------------------------
+# Parallel Processing Using future_map
+#------------------------------
+process_config_ehr <- function(i) {
+  # Import Python modules in this worker.
+  ctgan <- import("ctgan")
+  py_builtin <- import_builtins()
+  np <- import("numpy")
+  
+  # Extract parameters from the i-th row of param_grid_ehr.
+  row <- param_grid[i, ]
+  epochs <- row$epochs
+  batch_size <- row$batch_size
+  g_lr <- row$generator_lr
+  d_lr <- row$discriminator_lr
+  emb_dim <- row$embedding_dim
+  
+  gen_dim <- row$generator_dim[[1]]
+  disc_dim <- row$discriminator_dim[[1]]
+  
+  # Re-create the Python object for the data in this worker.
+  py_ehr <- r_to_py(ehr)
+  
+  # Convert dimensions to Python tuples.
+  py_gen_dim <- py_builtin$tuple(as.integer(gen_dim))
+  py_disc_dim <- py_builtin$tuple(as.integer(disc_dim))
+  
+  # Create the CTGAN synthesizer.
+  synthesizer <- ctgan$CTGAN(
+    epochs = as.integer(epochs),
+    batch_size = as.integer(batch_size),
+    generator_lr = g_lr,
+    discriminator_lr = d_lr,
+    generator_dim = py_gen_dim,
+    discriminator_dim = py_disc_dim,
+    embedding_dim = as.integer(emb_dim)
+  )
+  
+  synthesizer$fit(ehr, discrete_columns_ehr)
+  
+  # Save the loss plot.
+  loss_df_ehr <- as.data.frame(synthesizer$loss_values)
+  loss_df_ehr$Epoch <- as.numeric(loss_df_ehr$Epoch)
+  loss_df_ehr$`Generator Loss` <- as.numeric(loss_df_ehr$`Generator Loss`)
+  loss_df_ehr$`Discriminator Loss` <- as.numeric(loss_df_ehr$`Discriminator Loss`)
+  plot_filename <- sprintf("ehr_ctgan_loss_epochs%d_batch%d_genlr%s_disclr%s_gendim%s_discdim%s_embdim%d.png",
+                           epochs, batch_size, g_lr, d_lr,
+                           paste(gen_dim, collapse = "-"),
+                           paste(disc_dim, collapse = "-"),
+                           emb_dim)
+  p_ehr <- ggplot(loss_df_ehr, aes(x = Epoch)) +
+    geom_line(aes(y = `Generator Loss`, color = "Generator Loss")) +
+    geom_line(aes(y = `Discriminator Loss`, color = "Discriminator Loss")) +
+    labs(title = "CTGAN Training Loss Over Epochs",
+         x = "Epoch", y = "Loss", color = "Loss Type") +
+    theme_minimal() +
+    theme(plot.background = element_rect(fill = "white", color = NA))
+  ggsave(filename = plot_filename, plot = p_ehr, width = 8, height = 5, bg = "white")
+  
+  # Sample synthetic data.
+  synth_py_ehr <- synthesizer$sample(as.integer(nrow(ehr)))
+  
+  # Evaluate quality.
+  metric_val <- evaluate_quality(ehr, synth_py_ehr, numeric_columns_ehr, discrete_columns_ehr)
+  
+  # Return a data frame row.
+  data.frame(
+    epochs = epochs,
+    batch_size = batch_size,
+    generator_lr = g_lr,
+    discriminator_lr = d_lr,
+    generator_dim = paste(gen_dim, collapse = "-"),
+    discriminator_dim = paste(disc_dim, collapse = "-"),
+    embedding_dim = emb_dim,
+    quality_metric = metric_val,
+    loss_plot_file = plot_filename,
+    stringsAsFactors = FALSE
+  )
+}
+
+# Record start time.
+start_time <- Sys.time()
+
+# Process each configuration in parallel.
+results_list_ehr <- future_map(1:nrow(param_grid), process_config_ehr, .options = furrr_options(seed = TRUE))
+results_ehr <- bind_rows(results_list_ehr)
+
+# Record end time and compute execution time.
+end_time <- Sys.time()
+execution_time <- end_time - start_time
+print(execution_time)
+print(results_ehr)
+
+# Identify the best configuration (lowest quality_metric).
+best_params_ehr <- results_ehr %>% filter(quality_metric == min(quality_metric))
+cat("Best hyperparameters (allowed set):\n")
+print(best_params_ehr)
+```
+```{r}
+# look at only "converged" models:
+# Define the converged model file names (make sure the names include the ".png" extension
+# as they are saved by your code).
+converged_files <- c(
+  "ehr_ctgan_loss_epochs700_batch200_genlr1e-04_disclr1e-04_gendim128-64_discdim128-64_embdim64.png",
+  "ehr_ctgan_loss_epochs700_batch200_genlr1e-04_disclr1e-04_gendim128-64_discdim64-64_embdim64.png",
+  "ehr_ctgan_loss_epochs700_batch200_genlr1e-04_disclr1e-04_gendim64-64_discdim128-64_embdim64.png",
+  "ehr_ctgan_loss_epochs700_batch200_genlr0.001_disclr1e-04_gendim64-64_discdim128-64_embdim64.png",
+  "ehr_ctgan_loss_epochs700_batch200_genlr0.001_disclr1e-04_gendim64-64_discdim64-64_embdim64.png"
+)
+#this is actually too broad, only two models ended up converging: "ehr_ctgan_loss_epochs700_batch200_genlr0.001_disclr1e-04_gendim64-64_discdim128-64_embdim64.png"; "ehr_ctgan_loss_epochs700_batch200_genlr0.001_disclr1e-04_gendim64-64_discdim64-64_embdim64.png"
+
+# Filter the results data frame to show only the rows where the loss_plot_file column is in converged_files.
+converged_results <- results_ehr %>% filter(loss_plot_file %in% converged_files)
+
+# Print the converged results
+print(converged_results)
+
+```
+
+
+```{r best parameter}
+
+set.seed(123)
+
+#------------------------------
+# Re-run Best Model to Save Synthetic Data
+#------------------------------# Specify the six categorical columns.
+discrete_columns_ehr <- c('outcome', 
+                          'PatientGender', 
+                          'PatientLanguage', 
+                          'PatientMaritalStatus', 
+                          'PatientRace', 
+                          'CBC_BASOPHILS')
+
+
+best_epochs <- 700
+best_batch_size <- 200
+best_generator_lr <- 0.001
+best_discriminator_lr <- 1e-04
+best_embedding_dim <- 64
+
+# Define the best network dimensions.
+best_generator_dim <- c(64, 64)
+best_discriminator_dim <- c(128, 64)
+
+# Convert the network dimension vectors to Python tuples.
+py_best_generator_dim <- py_builtin$tuple(as.integer(best_generator_dim))
+py_best_discriminator_dim <- py_builtin$tuple(as.integer(best_discriminator_dim))
+
+# Re-create the Python object for your data.
+py_ehr <- r_to_py(ehr)
+
+# Initialize and train the final CTGAN model with the best hyperparameters.
+best_synthesizer_ehr <- ctgan$CTGAN(
+  epochs = as.integer(best_epochs),
+  batch_size = as.integer(best_batch_size),
+  generator_lr = best_generator_lr,
+  discriminator_lr = best_discriminator_lr,
+  generator_dim = py_best_generator_dim,
+  discriminator_dim = py_best_discriminator_dim,
+  embedding_dim = as.integer(best_embedding_dim)
+)
+
+# Train the model (using your defined discrete columns).
+best_synthesizer_ehr$fit(py_ehr, discrete_columns_ehr)
+
+# Sample synthetic data: generate as many rows as in your original data.
+ehr_ctgan_best <- best_synthesizer_ehr$sample(as.integer(nrow(ehr)))
+
+#loss plot
+
+# Convert loss values to a data frame
+loss_df <- as.data.frame(best_synthesizer_ehr$loss_values)
+
+# Convert columns to numeric (if necessary)
+loss_df$Epoch <- as.numeric(loss_df$Epoch)
+loss_df$`Generator Loss` <- as.numeric(loss_df$`Generator Loss`)
+loss_df$`Discriminator Loss` <- as.numeric(loss_df$`Discriminator Loss`)
+
+# Plot Generator and Discriminator Loss
+ggplot(loss_df, aes(x = Epoch)) +
+  geom_line(aes(y = `Generator Loss`, color = "Generator Loss")) +
+  geom_line(aes(y = `Discriminator Loss`, color = "Discriminator Loss")) +
+  labs(title = "CTGAN Training Loss Over Epochs",
+       x = "Epoch",
+       y = "Loss",
+       color = "Loss Type") 
+  theme_minimal()
+``` 
