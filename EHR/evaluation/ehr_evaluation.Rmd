@@ -39,11 +39,15 @@ reticulate::use_condaenv("thesis", required = T)
 Now we will dive into evaluating the quality of synthetic data based on its utility. We will evaluate uni-, bi-, and multivariate levels
 
 ###look at the original data
+```{r}
+#load data
+ehr <- read.csv("../data/clean/ehr.csv")[, -1]
+```
+
 
 ```{r check data}
 
 summary(ehr)
-
 
 #look at correlations
 
