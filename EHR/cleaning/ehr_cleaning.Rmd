@@ -1,0 +1,155 @@
+---
+title: "cleaning"
+author: "Laura Jochim"
+date: "2025-05-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loading packages, message=FALSE, warning=FALSE}
+#load packages
+
+library(tidyverse)
+library(rvinecopulib)
+library(kde1d)
+library(reticulate)
+library(synthpop)
+library(utils)
+library(pryr)
+library(dplyr)
+library(progressr)
+library(gplots)
+library(glmnet)
+library(purrr)
+library(caret)
+library(ggplot2)
+library(philentropy)
+library(progress)
+
+#set virtual environment
+reticulate::use_condaenv("thesis", required = T) 
+```
+
+This file aims to have a first exploration stage of the EHR from Figshare. First we will take a look of how the data looks like, do some data cleaning and processing.
+
+
+# EHR 10.000 patient data
+
+### Cleaning up the data
+```{r load raw data}
+#load the data
+lab_data <- readr::read_delim("../data/raw/10000-Patients (2)/LabsCorePopulatedTable.txt")
+pat_data <- readr::read_delim("../data/raw/10000-Patients (2)/PatientCorePopulatedTable.txt")
+diag_data <- readr::read_delim("../data/raw/10000-Patients (2)/AdmissionsDiagnosesCorePopulatedTable.txt")
+adm_data <- readr::read_delim("../data/raw/10000-Patients (2)/AdmissionsCorePopulatedTable.txt")
+
+ls()
+pryr::mem_used()
+
+```
+
+```{r clean data}
+### Preprocess data ######
+## Lab values; only take last measurement per patient; 
+lab_data <- lab_data %>% group_by(PatientID, AdmissionID, LabName) %>% 
+  filter(LabDateTime == max(LabDateTime))
+pryr::mem_used()
+
+## Create ID column for outcome and admission data
+diag_data <- diag_data %>% unite(ID, c("PatientID", "AdmissionID"), remove = FALSE)
+adm_data <- adm_data%>% unite(ID, c("PatientID", "AdmissionID"), remove = FALSE)
+lab_data <- lab_data %>% unite(ID, c("PatientID", "AdmissionID"), remove = FALSE)
+
+## Construct outome
+diag_data <- diag_data %>% mutate(outcome = str_detect(PrimaryDiagnosisDescription, 
+                                                     regex("Malignant neoplasm", ignore_case = TRUE)))
+
+diag_data$outcome <- diag_data$outcome %>% ifelse(yes = "case", no = "control") %>% as.factor
+
+## Join all data
+dat <- inner_join(diag_data, adm_data)
+dat <- inner_join(dat, lab_data)
+dat <- inner_join(dat, pat_data)
+
+## Drop PatientID
+dat <- dat %>% select(-PatientID)
+
+## Take first admission; 
+dat <- dat %>% filter(AdmissionID == 1)
+
+
+## Convert to wide format; put each blood marker in own column
+dat <- dat %>% select(-LabUnits, -LabDateTime) %>% 
+  pivot_wider(names_from = LabName, values_from = LabValue)
+
+## Set all 'irregular' lab marker names to underscore
+names(dat) <- names(dat) %>% str_replace_all(" ", "_") %>% 
+  str_replace_all(":", "") %>% str_replace_all("/", "_")
+
+## Define Patient age and length of stay
+dat <- dat %>% mutate(PatientAge = interval(PatientDateOfBirth, AdmissionStartDate) / dyears(1))
+dat <- dat %>% mutate(PatientLOS = interval(AdmissionStartDate, AdmissionEndDate) / ddays(1))
+
+## Reorder columns and take only complete cases
+dat <- dat %>% select(order(names(dat))) %>% select(-starts_with("Admission"))
+dat <- dat %>% relocate(ID, outcome, starts_with("Patient"))
+dat <- dat %>% filter(complete.cases((dat)))
+table(dat$outcome)
+
+## A list of blood markers and their units
+lab_data %>% ungroup %>% select(LabName, LabUnits) %>% 
+  distinct(LabName, .keep_all = TRUE) %>% arrange(LabName) %>% print(n=50)
+
+#################################################
+
+# extra adjustemtn of the data for synthesizing
+
+#remove the ID row becuase it does not make sense to inlcude for synthetic data
+ehr <- dat%>% select(-ID)
+##drop Admission ID
+#ehr <- ehr %>% select(-AdmissionID)
+#same goes for PrimaryDiagnosisCode and PrimaryDiagnosisDescription because they are individual for each patient
+ehr <- ehr %>% select(-c(PrimaryDiagnosisCode, PrimaryDiagnosisDescription))
+#also remove URINALYSIS_SPECIFIC_GRAVITY, because it only has '1'
+ehr <- ehr %>% select(-URINALYSIS_SPECIFIC_GRAVITY)
+#transform the PatientDateOfBirth variable to exlcude time stamp
+ehr <- ehr %>%
+  mutate(PatientDateOfBirth = as.Date(PatientDateOfBirth)) 
+
+
+
+#(#apperently we are running into trouble with the PatientDateOfBirth becuase they do not match From synthetic  5373  from original  7867
+#length(unique(ehr$PatientDateOfBirth))
+#length(unique(ehr_synthpop$syn$PatientDateOfBirth))
+
+#the synthesis process might have collapsed date values into a smaller set.
+#I tried fixing it by doing this:
+#ehr_synthpop <- syn(ehr, method = c(PatientDateOfBirth = "normrank"))
+#or this:
+#ehr_synthpop <- syn(ehr, method = c(PatientDateOfBirth = "cart"))
+#but none fixed the problem
+#my solution for now is just to delete the variable and rerun)
+
+#delete PatientDateOfBirth
+ehr <- ehr %>% select(-PatientDateOfBirth)
+
+# make "CBC_BASOPHILS" discrete becuase it only has three levels
+ehr <- ehr %>% mutate(CBC_BASOPHILS = as.character(CBC_BASOPHILS))
+
+```
+
+```{r save data}
+#save the data
+
+#write.csv(ehr, "../data/clean/ehr.csv")
+
+
+```
+
