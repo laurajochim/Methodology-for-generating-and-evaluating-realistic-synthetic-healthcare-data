@@ -45,6 +45,7 @@ ehr <- read.csv("../data/clean/ehr.csv")[, -1]
 ehr_synthpop <- read.csv("../data/synthetic/ehr_syn.csv")[, -1]
 ehr_vc <- read.csv("../data/synthetic/ehr_vc.csv")[, -1]
 ehr_ctgan <- read.csv("../data/synthetic/ehr_ctgan.csv")[, -1]
+ehr_ctgan_best <- read.csv("../data/synthetic/ehr_ctgan_tuned.csv")[, -1]
 ```
 
 
