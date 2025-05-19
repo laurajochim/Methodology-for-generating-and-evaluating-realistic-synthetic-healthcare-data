@@ -80,17 +80,109 @@ head(corr_ehr, 20)
 top_20_ehr <- head(corr_ehr, 20)
 
 #heatmap
-hm.2 <- function(obj){
-  try(
-    heatmap.2(obj,Rowv=F,symm=T,col=colorRampPalette(c("brown","white","yellow"))(25),
-              dendrogram='none'
-              ,trace='none'
-              ,symkey=TRUE,breaks=seq(-1,1,length=26),
-              key = T), silent = TRUE)
+my_limit <- 0.2
+hm.2 <- hm.2 <- function(obj, titleText = "Heatmap of Original EHR Data") {
+  par(
+    mar = c(1, 1, 1, 1),    # tiny inner margins
+    oma = c(0, 0, 3, 0)     # room above for the main title
+  )
+
+  heatmap.2(
+    obj,
+    Rowv       = FALSE,
+    Colv       = FALSE,
+    dendrogram = "none",
+    symm       = TRUE,
+
+    col    = colorRampPalette(c("brown","white","yellow"))(25),
+    breaks = seq(-my_limit, my_limit, length.out = 26),
+
+    trace  = "none",
+    labRow = FALSE,
+    labCol = FALSE,
+
+    key          = TRUE,
+    density.info = "histogram",
+    symkey       = TRUE,
+    key.title    = "Color Key and Histogram",
+    key.par      = list(
+      mar       = c(2, 1, 1, 1),
+      cex.main  = 0.8,
+      font.main = 2,
+      cex.axis  = 0.7,
+      mgp       = c(2, 0.5, 0)
+    ),
+    key.xlab     = "Value",
+    key.ylab     = "Count",
+
+    # 2×3 layout to centre panel 4
+    lmat    = rbind(c(0, 4, 0),
+                    c(2, 1, 3)),
+    lwid    = c(1.5, 5, 1.5),
+    lhei    = c(0.8, 5),
+    margins = c(1, 1)
+  )
+
+  # use the passed-in titleText here
+  mtext(
+    titleText,
+    side   = 3,
+    outer  = TRUE,
+    line   = 1,
+    cex    = 1.4,
+    font   = 2
+  )
 }  
 
+# define discrete and continuous variables
+var_types <- c(
+  "d",  # outcome (factor)
+  "c",  # PatientAge (numeric)
+  "d",  # PatientGender (factor)
+  "d",  # PatientLanguage (factor)
+  "c",  # PatientLOS (numeric)
+  "d",  # PatientMaritalStatus (factor)
+  "c",  # PatientPopulationPercentageBelowPoverty (numeric)
+  "d",  # PatientRace (factor)
+  "c",  # CBC_ABSOLUTE_LYMPHOCYTES (numeric)
+  "c",  # CBC_ABSOLUTE_NEUTROPHILS (numeric)
+  "d",  # CBC_BASOPHILS (factor)
+  "c",  # CBC_EOSINOPHILS (numeric)
+  "c",  # CBC_HEMATOCRIT (numeric)
+  "c",  # CBC_HEMOGLOBIN (numeric)
+  "c",  # CBC_LYMPHOCYTES (numeric)
+  "c",  # CBC_MCH (numeric)
+  "c",  # CBC_MCHC (numeric)
+  "c",  # CBC_MEAN_CORPUSCULAR_VOLUME (numeric)
+  "c",  # CBC_MONOCYTES (numeric)
+  "c",  # CBC_NEUTROPHILS (numeric)
+  "c",  # CBC_PLATELET_COUNT (numeric)
+  "c",  # CBC_RDW (numeric)
+  "c",  # CBC_RED_BLOOD_CELL_COUNT (numeric)
+  "c",  # CBC_WHITE_BLOOD_CELL_COUNT (numeric)
+  "c",  # METABOLIC_ALBUMIN (numeric)
+  "c",  # METABOLIC_ALK_PHOS (numeric)
+  "c",  # METABOLIC_ALT_SGPT (numeric)
+  "c",  # METABOLIC_ANION_GAP (numeric)
+  "c",  # METABOLIC_AST_SGOT (numeric)
+  "c",  # METABOLIC_BILI_TOTAL (numeric)
+  "c",  # METABOLIC_BUN (numeric)
+  "c",  # METABOLIC_CALCIUM (numeric)
+  "c",  # METABOLIC_CARBON_DIOXIDE (numeric)
+  "c",  # METABOLIC_CHLORIDE (numeric)
+  "c",  # METABOLIC_CREATININE (numeric)
+  "c",  # METABOLIC_GLUCOSE (numeric)
+  "c",  # METABOLIC_POTASSIUM (numeric)
+  "c",  # METABOLIC_SODIUM (numeric)
+  "c",  # METABOLIC_TOTAL_PROTEIN (numeric)
+  "c",  # URINALYSIS_PH (numeric)
+  "c",  # URINALYSIS_RED_BLOOD_CELLS (numeric)
+  "c"   # URINALYSIS_WHITE_BLOOD_CELLS (numeric)
+)
 
-ehr[,which(var_tcga %in% "c")] %>% cor %>% hm.2 
+ehr[var_types=="c"] %>%
+  cor(use="complete.obs") %>%
+  hm.2(titleText = "Heatmap of EHR Data")
 
 ```
 ### Univariate
@@ -285,19 +377,8 @@ ehr_synthpop_fac <- ehr_synthpop$syn %>%
 
 #heatmap
 my_limit <- 0.2
-hm.2 <- function(obj){
-  try(
-    heatmap.2(obj,Rowv=F,symm=T,col=colorRampPalette(c("brown","white","yellow"))(25),
-              dendrogram='none'
-              ,main = "Heatmap of Synthpop EHR Data"
-              ,trace='none'
-              ,labRow = F
-              ,labCol = F
-              ,symkey=TRUE, breaks=seq(-my_limit, my_limit,length=26),
-              key = T), silent = TRUE)
-}  
 
-ehr_synthpop$syn[,which(var_types %in% "c")] %>% cor %>% hm.2 
+ehr_synthpop$syn[,which(var_types %in% "c")] %>% cor %>% hm.2(titleText = "Heatmap of Synthpop EHR Data")
 
 # Calculate the correlation matrix (Spearman correlation becuase works for mixed data)
 corr_matrix_synthpop <- cor(ehr_synthpop_num, use = "pairwise.complete.obs", method = "spearman")
@@ -384,18 +465,7 @@ Vine Copula vs Real Data
 
 #heatmap
 my_limit <- 0.2
-hm.2 <- function(obj){
-  try(
-    heatmap.2(obj,Rowv=F,symm=T,col=colorRampPalette(c("brown","white","yellow"))(25),
-              dendrogram='none'
-              ,main = "Heatmap of Vine Copula EHR Data"
-              ,trace='none'
-              ,labRow = F
-              ,labCol = F
-              ,symkey=TRUE, breaks=seq(-my_limit, my_limit,length=26),
-              key = T), silent = TRUE)
-}  
-ehr_vc[,which(var_types %in% "c")] %>% cor %>% hm.2 
+ehr_vc[,which(var_types %in% "c")] %>% cor %>% hm.2(titleText = "Heatmap of Vine Copula EHR Data") 
 
 # Subset only continuous variables based on var_types
 continuous_ehr_vc <- ehr_vc[, which(var_types == "c")]
@@ -484,18 +554,7 @@ geom_point(data = subset(plot_data_vc_ehr, dataset == "real"), alpha = 0.8) +
 
 #heatmap
 my_limit <- 0.2
-hm.2 <- function(obj){
-  try(
-    heatmap.2(obj,Rowv=F,symm=T,col=colorRampPalette(c("brown","white","yellow"))(25),
-              dendrogram='none'
-              ,main = "Heatmap of ctGAN EHR Data"
-              ,trace='none'
-              ,labRow = F
-              ,labCol = F
-              ,symkey=TRUE, breaks=seq(-my_limit, my_limit,length=26),
-              key = T), silent = TRUE)
-}  
-ehr_ctgan_700[,which(var_types %in% "c")] %>% cor %>% hm.2 
+ehr_ctgan_700[,which(var_types %in% "c")] %>% cor %>% hm.2(titleText = "Heatmap of ctGAN EHR Data") 
 
 
 # Calculate the correlation matrix (Spearman correlation becuase works for mixed data)
@@ -534,18 +593,8 @@ top_20_ctgan
 ```{r tuned ctGAN correlation}
 #heatmap
 my_limit <- 0.2
-hm.2 <- function(obj){
-  try(
-    heatmap.2(obj,Rowv=F,symm=T,col=colorRampPalette(c("brown","white","yellow"))(25),
-              dendrogram='none'
-              ,main = "Heatmap of tuned ctGAN EHR Data"
-              ,trace='none'
-              ,labRow = F
-              ,labCol = F
-              ,symkey=TRUE, breaks=seq(-my_limit, my_limit,length=26),
-              key = T), silent = TRUE)
-}  
-ehr_ctgan_best[,which(var_types %in% "c")] %>% cor %>% hm.2 
+ 
+ehr_ctgan_best[,which(var_types %in% "c")] %>% cor %>% hm.2(titleText = "Heatmap of tuned ctGAN EHR Data") 
 
 ```
 
