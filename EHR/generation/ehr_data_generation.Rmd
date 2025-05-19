@@ -42,73 +42,6 @@ ehr <- read.csv("../data/clean/ehr.csv")[, -1]
 ```
 
 
-```{r}
-#take a look at the data summary
-summary(ehr)
-
-#heatmap
-my_limit <- 0.2
-hm.2 <- function(obj){
-  try(
-    heatmap.2(obj,Rowv=F,symm=T,col=colorRampPalette(c("brown","white","yellow"))(25),
-              dendrogram='none'
-              ,main = "Heatmap of Original EHR Data"
-              ,trace='none'
-              ,labRow = F
-              ,labCol = F
-              ,symkey=TRUE, breaks=seq(-my_limit, my_limit,length=26),
-              key = T), silent = TRUE)
-}  
-
-# define discrete and continuous variables
-var_types <- c(
-  "d",  # outcome (factor)
-  "c",  # PatientAge (numeric)
-  "d",  # PatientGender (factor)
-  "d",  # PatientLanguage (factor)
-  "c",  # PatientLOS (numeric)
-  "d",  # PatientMaritalStatus (factor)
-  "c",  # PatientPopulationPercentageBelowPoverty (numeric)
-  "d",  # PatientRace (factor)
-  "c",  # CBC_ABSOLUTE_LYMPHOCYTES (numeric)
-  "c",  # CBC_ABSOLUTE_NEUTROPHILS (numeric)
-  "d",  # CBC_BASOPHILS (factor)
-  "c",  # CBC_EOSINOPHILS (numeric)
-  "c",  # CBC_HEMATOCRIT (numeric)
-  "c",  # CBC_HEMOGLOBIN (numeric)
-  "c",  # CBC_LYMPHOCYTES (numeric)
-  "c",  # CBC_MCH (numeric)
-  "c",  # CBC_MCHC (numeric)
-  "c",  # CBC_MEAN_CORPUSCULAR_VOLUME (numeric)
-  "c",  # CBC_MONOCYTES (numeric)
-  "c",  # CBC_NEUTROPHILS (numeric)
-  "c",  # CBC_PLATELET_COUNT (numeric)
-  "c",  # CBC_RDW (numeric)
-  "c",  # CBC_RED_BLOOD_CELL_COUNT (numeric)
-  "c",  # CBC_WHITE_BLOOD_CELL_COUNT (numeric)
-  "c",  # METABOLIC_ALBUMIN (numeric)
-  "c",  # METABOLIC_ALK_PHOS (numeric)
-  "c",  # METABOLIC_ALT_SGPT (numeric)
-  "c",  # METABOLIC_ANION_GAP (numeric)
-  "c",  # METABOLIC_AST_SGOT (numeric)
-  "c",  # METABOLIC_BILI_TOTAL (numeric)
-  "c",  # METABOLIC_BUN (numeric)
-  "c",  # METABOLIC_CALCIUM (numeric)
-  "c",  # METABOLIC_CARBON_DIOXIDE (numeric)
-  "c",  # METABOLIC_CHLORIDE (numeric)
-  "c",  # METABOLIC_CREATININE (numeric)
-  "c",  # METABOLIC_GLUCOSE (numeric)
-  "c",  # METABOLIC_POTASSIUM (numeric)
-  "c",  # METABOLIC_SODIUM (numeric)
-  "c",  # METABOLIC_TOTAL_PROTEIN (numeric)
-  "c",  # URINALYSIS_PH (numeric)
-  "c",  # URINALYSIS_RED_BLOOD_CELLS (numeric)
-  "c"   # URINALYSIS_WHITE_BLOOD_CELLS (numeric)
-)
-
-ehr[which(var_types %in% "c")] %>% cor %>% hm.2 
-```
-
 Now we have a nicely cleaned data, thank you Said, to work with. Each row represents an individual and each column a variable the patient was measured on, e.g. age, race, red blood cell count, white blood cell count, platelet count etc... 
 It is important to note yet again that also this electronic health care record of 10.000 parients is a syntesized and not real one. The following step will inlcude synthesizing data based on this EHR.
 
@@ -255,6 +188,7 @@ N <- nrow(ehr_num)
 
 ehr_vc <- simulate.estVineCopula(fit_vc, 1.5*N)
 ```
+
 ```{r look at vine copula, message=F, warning=FALSE}
 #contour plots of the pair copulas
 contour(fit_vc$vine_copula)
@@ -299,6 +233,105 @@ dim(ehr_vc)
 
 ```
 
+## vine copula tables
+```{r vine copula tables for EHR}
+# 1. get a summary data.frame of all pair‐copulas
+sum_df <- summary(fit_vc$vine_copula)
+
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(stringr)
+
+# 1) First, build a character vector of your variable names in index order:
+var_names <- c(
+  "outcome",
+  "PatientAge",
+  "PatientGender",
+  "PatientLanguage",
+  "PatientLOS",
+  "PatientMaritalStatus",
+  "PatientPopulationPercentageBelowPoverty",
+  "PatientRace",
+  "CBC_ABSOLUTE_LYMPHOCYTES",
+  "CBC_ABSOLUTE_NEUTROPHILS",
+  "CBC_BASOPHILS",
+  "CBC_EOSINOPHILS",
+  "CBC_HEMATOCRIT",
+  "CBC_HEMOGLOBIN",
+  "CBC_LYMPHOCYTES",
+  "CBC_MCH",
+  "CBC_MCHC",
+  "CBC_MEAN_CORPUSCULAR_VOLUME",
+  "CBC_MONOCYTES",
+  "CBC_NEUTROPHILS",
+  "CBC_PLATELET_COUNT",
+  "CBC_RDW",
+  "CBC_RED_BLOOD_CELL_COUNT",
+  "CBC_WHITE_BLOOD_CELL_COUNT",
+  "METABOLIC_ALBUMIN",
+  "METABOLIC_ALK_PHOS",
+  "METABOLIC_ALT_SGPT",
+  "METABOLIC_ANION_GAP",
+  "METABOLIC_AST_SGOT",
+  "METABOLIC_BILI_TOTAL",
+  "METABOLIC_BUN",
+  "METABOLIC_CALCIUM",
+  "METABOLIC_CARBON_DIOXIDE",
+  "METABOLIC_CHLORIDE",
+  "METABOLIC_CREATININE",
+  "METABOLIC_GLUCOSE",
+  "METABOLIC_POTASSIUM",
+  "METABOLIC_SODIUM",
+  "METABOLIC_TOTAL_PROTEIN",
+  "URINALYSIS_PH",
+  "URINALYSIS_RED_BLOOD_CELLS",
+  "URINALYSIS_WHITE_BLOOD_CELLS",
+  "outcome_d",
+  "PatientGender_d",
+  "PatientLanguage_d",
+  "PatientMaritalStatus_d",
+  "PatientRace_d",
+  "CBC_BASOPHILS_d"
+)
+
+# 2) grab summary and coerce to plain df
+sum_df <- as.data.frame(summary(fit_vc$vine_copula))
+
+flat_tbl <- sum_df %>%
+  # strip off 'c(', ')', and all double-quotes
+  mutate(
+    conditioned_clean = str_remove_all(conditioned, 'c\\(|\\)|"')
+  ) %>%
+  # now separate on the comma into two integer columns
+  separate(
+    conditioned_clean,
+    into    = c("v1_idx", "v2_idx"),
+    sep     = ",\\s*",
+    convert = TRUE
+  ) %>%
+  # map indices → names
+  mutate(
+    var1    = var_names[v1_idx],
+    var2    = var_names[v2_idx],
+    # build the conditioned-on string as before
+    cond_on = map_chr(
+      conditioning,
+      ~ if (length(.x)==0) "" else paste(var_names[.x], collapse = ", ")
+    )
+   ) %>%
+  select(
+    tree, edge,
+    var1, var2, cond_on,
+    family, rotation, parameters
+  )
+
+print(flat_tbl)
+
+tree1_tbl <- flat_tbl %>% filter(tree == 1) %>%
+  select(var1, var2, family, rotation, parameters)
+
+```
 
 ### ctGAN
 ```{r ctGAN 1, warning=FALSE, message=FALSE}
@@ -468,7 +501,7 @@ generator_dim_options <- list(c(64, 64), c(128, 64))
 discriminator_dim_options <- list(c(64, 64), c(128, 64))
 embedding_dim_options <- c(64)
 
-# Compute total iterations (for progress later, if desired).
+# Compute total iterations 
 total_iter <- length(epochs_values) * length(batch_size_values) *
   length(generator_lr_values) * length(discriminator_lr_values) *
   length(generator_dim_options) * length(discriminator_dim_options) *
@@ -501,9 +534,7 @@ param_grid$discriminator_dim <- rep(discriminator_dim_options, times = nrow(para
 #------------------------------
 # Parallel Processing Using future_map
 #------------------------------
-#------------------------------
-# Parallel Processing Using future_map
-#------------------------------
+
 process_config_ehr <- function(i) {
   # Import Python modules in this worker.
   ctgan <- import("ctgan")
@@ -627,7 +658,9 @@ set.seed(123)
 
 #------------------------------
 # Re-run Best Model to Save Synthetic Data
-#------------------------------# Specify the six categorical columns.
+#------------------------------
+
+# Specify the six categorical columns.
 discrete_columns_ehr <- c('outcome', 
                           'PatientGender', 
                           'PatientLanguage', 
