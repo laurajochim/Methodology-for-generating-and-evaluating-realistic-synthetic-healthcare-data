@@ -42,6 +42,9 @@ Now we will dive into evaluating the quality of synthetic data based on its util
 ```{r}
 #load data
 ehr <- read.csv("../data/clean/ehr.csv")[, -1]
+ehr_synthpop <- read.csv("../data/synthetic/ehr_syn.csv")[, -1]
+ehr_vc <- read.csv("../data/synthetic/ehr_vc.csv")[, -1]
+ehr_ctgan <- read.csv("../data/synthetic/ehr_ctgan.csv")[, -1]
 ```
 
 
@@ -599,22 +602,7 @@ ehr_ctgan_best[,which(var_types %in% "c")] %>% cor %>% hm.2(titleText = "Heatmap
 ```
 
 ```{r}
-# Calculate Pearson correlation matrices for real and synthetic data
-#corr_real <- cor(continuous_RPPA, use = "pairwise.complete.obs", method = "pearson")
-#corr_syn  <- cor(continuous_RPPA_syn, use = "pairwise.complete.obs", method = "pearson")
 
-# Compute the absolute differences between the two correlation matrices
-#abs_diff <- abs(corr_real - corr_syn)
-
-# Extract the upper triangle of the difference matrix (excluding the diagonal)
-#upper_tri_indices <- upper.tri(abs_diff, diag = FALSE)
-#mean_abs_diff <- mean(abs_diff[upper_tri_indices])
-
-# Multiply by a scaling factor (e.g., 100) for presentation purposes
-#correlation_distance <- mean_abs_diff * 100
-
-# Print the correlation distance
-#print(mean_abs_diff)
 #########################################################################################
 
 # Function to compute the absolute differences for the unique (upper triangle) correlations
