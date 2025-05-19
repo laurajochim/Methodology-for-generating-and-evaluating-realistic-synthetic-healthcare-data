@@ -33,6 +33,15 @@ library(progress)
 reticulate::use_condaenv("thesis", required = T) 
 ```
 
+```{r load data}
+
+RPPA_nona <- read.csv("../data/clean/RPPA_nona.csv")
+RRPA_synthpop <- read.csv("../data/synthetic/tcga_syn.csv")[, -1]
+tcga_vc <- read.csv("../data/synthetic/tcga_vc.csv")[, -1]
+tcga_ctgan <- read.csv("../data/synthetic/tcga_ctgan.csv")[, -1]
+
+```
+
 
 ### Univartiate analysis 
 
@@ -83,7 +92,7 @@ head(ps_tcga_vc, n = 20L)
 
 ctGAN vs. Original data
 ```{r ctGAN distribution}
-summary(tcga_ctgan2)
+summary(tcga_ctgan)
 
 compare_ctGAN <- synthpop::compare(tcga_ctgan, RPPA_df)
 compare_ctGAN$plots
