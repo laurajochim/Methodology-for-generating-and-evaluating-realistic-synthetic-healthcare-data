@@ -6,13 +6,13 @@ data/raw/    : Raw TCGA BRCA archives (ZIP files, needs to be unzipped before wo
 
 data/clean/  : Cleaned BRCA data saved as .csv
 
-data/synthetic/: Generated synthetic datasets (vc, ctGAN, synthpop)
+data/synthetic/: Generated synthetic datasets (synthpop, vine copula, ctGAN)
 
 2. Cleaning
 
 Rscript BRCA/cleaning/tcga_cleaning.Rmd
 
-Reads from data/raw/, applies dataset-specific cleaning and rearranging, and writes tcga_clean.rds to data/clean/.
+Reads from data/raw/, applies dataset-specific cleaning and rearranging, and writes RPPA_nona.csv to data/clean/.
 
 3. Generation
 
