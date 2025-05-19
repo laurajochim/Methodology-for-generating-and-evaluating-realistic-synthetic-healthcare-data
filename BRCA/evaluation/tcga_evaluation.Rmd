@@ -53,7 +53,7 @@ summary(RRPA_synthpop)
 #GGally::ggpairs(data.frame(ehr_synthpop$syn))
 
 RPPA_df <- as.data.frame(RPPA_nona)
-compare_syn <- synthpop::compare(RRPA_synthpop$syn, RPPA_df)
+compare_syn <- synthpop::compare(RRPA_synthpop, RPPA_df)
 compare_syn$plots
 
 ps_syn <- compare_syn$tab.utility
@@ -161,15 +161,114 @@ ggplot(ps_combined, aes(x = Method, y = S_pMSE_log, fill = Method)) +
 
 Synthpop vs real data
 
+```{r origina data}
+
+var_tcga <- ifelse(RPPA_nona %>% apply(2, \(x) length(unique(x))) %>% `<`(10), "d", "c")
+#look at correlations
+
+continuous_RPPA <- RPPA_nona[, which(var_tcga == "c")]
+
+
+cor_matrix <- cor(continuous_RPPA, use = "pairwise.complete.obs", method = "pearson")
+
+#make a table to the correlations
+corr_RPPA <- as.data.frame(as.table(cor_matrix))
+
+# Rename columns for clarity
+colnames(corr_RPPA) <- c("Var1", "Var2", "Correlation")
+
+# Remove self-correlations (Var1 == Var2)
+corr_RPPA <- subset(corr_RPPA, Var1 != Var2)
+
+# Create a consistent pair identifier (sorted variable names)
+corr_RPPA$Pair <- apply(corr_RPPA[, c("Var1", "Var2")], 1, function(x) paste(sort(x), collapse = "_"))
+
+# Remove duplicate pairs
+corr_RPPA <- corr_RPPA[!duplicated(corr_RPPA$Pair), ]
+
+# Sort by absolute correlation value in descending order
+corr_RPPA <- corr_RPPA[order(abs(corr_RPPA$Correlation), decreasing = TRUE), ]
+
+# Print top correlations
+head(corr_RPPA, 20)
+# Print top correlations
+top_20_tcga <- head(corr_RPPA, 20)
+
+#write.csv(RPPA_nona, "cleaned_tcga.csv")
+
+#heatmap
+my_limit <- 1
+hm.2 <- function(obj, titleText = "Heatmap of Original EHR Data") {
+  par(
+    mar = c(1, 1, 1, 1),    # tiny inner margins
+    oma = c(0, 0, 3, 0)     # room above for the main title
+  )
+
+  heatmap.2(
+    obj,
+    Rowv       = FALSE,
+    Colv       = FALSE,
+    dendrogram = "none",
+    symm       = TRUE,
+
+    col    = colorRampPalette(c("brown","white","yellow"))(25),
+    breaks = seq(-my_limit, my_limit, length.out = 26),
+
+    trace  = "none",
+    labRow = FALSE,
+    labCol = FALSE,
+
+    key          = TRUE,
+    density.info = "histogram",
+    symkey       = TRUE,
+    key.title    = "Color Key and Histogram",
+    key.par      = list(
+      mar       = c(2, 1, 1, 1),
+      cex.main  = 0.8,
+      font.main = 2,
+      cex.axis  = 0.7,
+      mgp       = c(2, 0.5, 0)
+    ),
+    key.xlab     = "Value",
+    key.ylab     = "Count",
+
+    # 2×3 layout to centre panel 4
+    lmat    = rbind(c(0, 4, 0),
+                    c(2, 1, 3)),
+    lwid    = c(1.5, 5, 1.5),
+    lhei    = c(0.8, 5),
+    margins = c(1, 1)
+  )
+
+  # use the passed-in titleText here
+  mtext(
+    titleText,
+    side   = 3,
+    outer  = TRUE,
+    line   = 1,
+    cex    = 1.4,
+    font   = 2
+  )
+}
+
+
+RPPA_nona[var_types_tcga=="c"] %>%
+  cor(use="complete.obs") %>%
+  hm.2(titleText = "Heatmap of BRCA Data")  
+
+
+```
+
+
 ```{r synthpop correlation}
 
 #heat map
 
-RRPA_synthpop$syn[,which(var_tcga %in% "c")] %>% cor %>% hm.2 
+RRPA_synthpop[,which(var_tcga %in% "c")] %>% cor %>% hm.2(titelText= "Heatmap BRCA Synthpop") 
   
 
 # Subset only continuous variables based on var_tcga
-continuous_RPPA_syn <- RRPA_synthpop$syn[, which(var_tcga == "c")]
+continuous_RPPA_syn <- RRPA_synthpop[, which(var_tcga == "c")]
 
 # Calculate the correlation matrix (Spearman correlation becuase works for mixed data)
 corr_matrix_synthpop_tcga <- cor(continuous_RRPA_syn, use = "pairwise.complete.obs", method = "pearson")
@@ -254,7 +353,7 @@ ggplot(plot_data_syn, aes(x = Var1_value, y = Var2_value, color = dataset)) +
 
 #heat map
 
-tcga_vc[,which(var_tcga %in% "c")] %>% cor %>% hm.2 
+tcga_vc[,which(var_tcga %in% "c")] %>% cor %>% hm.2(titelText= "Heatmap BRCA Vine Copula")  
   
 
 # Subset only continuous variables based on var_tcga
@@ -344,7 +443,7 @@ ctGAN vs real data
 
 #heat map
 
-tcga_ctgan2[,which(var_tcga %in% "c")] %>% cor %>% hm.2 
+tcga_ctgan2[,which(var_tcga %in% "c")] %>% cor %>% hm.2(titelText= "Heatmap BRCA ctGAN") 
 
 
 #do the same for the ctgan data
@@ -508,7 +607,7 @@ Synthpop vs real data
 #add label
 real_data_tcga <- RPPA_nona
 real_data_tcga$label <- "real"
-synthpop_data_tcga <- RRPA_synthpop$syn
+synthpop_data_tcga <- RRPA_synthpop
 synthpop_data_tcga$label <- "fake"
 
 #rbind the two data sets
