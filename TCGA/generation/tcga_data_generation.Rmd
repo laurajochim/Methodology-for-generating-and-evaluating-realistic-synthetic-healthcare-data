@@ -28,6 +28,7 @@ library(caret)
 library(ggplot2)
 library(philentropy)
 library(progress)
+library(kableExtra)
 
 #set virtual environment
 reticulate::use_condaenv("thesis", required = T) 
@@ -205,6 +206,82 @@ tcga_vc <- tcga_vc[1:N,]
 
 # Check dimensions
 dim(tcga_vc)
+```
+
+
+```{r vc tables}
+# 1. grab the structure matrix and the nested list of bicopulas
+# 1) pull out & coerce the structure matrix
+M_mat    <- as.matrix(fit_vc_tcga$vine_copula$structure)
+
+# 2) the nested list of pair‐copulas
+pair_cops <- fit_vc_tcga$vine_copula$pair_copulas
+
+# 3) your variable names
+var_names <- colnames(tcga_vc)   # or however you named your data
+
+# 4) loop and assemble
+d    <- nrow(M_mat)
+rows <- vector("list", length = d*(d-1)/2)
+k    <- 1
+
+for (t in seq_len(d-1)) {
+  for (e in seq_len(d - t)) {
+    pc      <- pair_cops[[t]][[e]]
+    idx     <- c(M_mat[d - e + 1, e], M_mat[t, e])
+    cond_ix <- if (t > 1) rev(M_mat[1:(t-1), e]) else integer(0)
+
+    rows[[k]] <- tibble(
+      tree     = t,
+      edge     = e,
+      var1     = var_names[idx[1]],
+      var2     = var_names[idx[2]],
+      cond_on  = if (length(cond_ix)==0) "" else paste(var_names[cond_ix], collapse = ", "),
+      family   = pc$family,
+      rotation = pc$rotation
+    )
+    k <- k + 1
+  }
+}
+
+flat_tbl_tcga <- bind_rows(rows)
+
+# now you can, for instance, pull out only Tree 1:
+flat_tbl_tcga <- flat_tbl_tcga %>% filter(tree == 1) %>%
+  select(var1, var2, family, rotation)
+
+library(kableExtra)
+
+flat_tbl_tcga <- flat_tbl_tcga %>%
+  transmute(
+    `Variable 1` = gsub("_", " ", Var1),
+    `Variable 2` = gsub("_", " ", Var2),
+    Family        = family,
+    Rotation      = rotation
+  )
+
+write.csv(flat_tbl_tcga, file = "vc_brca.csv")
+
+df <- read.csv("vc_brca.csv")
+df <- df[, -1]
+
+# tell xtable we want a longtable
+xt <- xtable(
+  df,
+  caption   = "Unconditional pair‐copulas of the fitted vine copula for BRCA",
+  label     = "tab:vc_brca"
+)
+print(
+  xt,
+  include.rownames = FALSE,
+  floating         = FALSE,     # we will wrap in longtable by hand
+  tabular.environment = "longtable",
+  size             = "\\small",
+  sanitize.text.function = identity,
+  comment = FALSE
+)
+
+save_kable(latex_tbl, "vc_brca.tex")
 ```
 
 
