@@ -39,6 +39,7 @@ RPPA_nona <- read.csv("../data/clean/RPPA_nona.csv")
 RRPA_synthpop <- read.csv("../data/synthetic/tcga_syn.csv")[, -1]
 tcga_vc <- read.csv("../data/synthetic/tcga_vc.csv")[, -1]
 tcga_ctgan <- read.csv("../data/synthetic/tcga_ctgan.csv")[, -1]
+tcga_tuned_ctgan <- read.csv("../data/synthetic/tcga_ctgan_tuned.csv")[, -1]
 
 ```
 
