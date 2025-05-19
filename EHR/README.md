@@ -1,6 +1,6 @@
 This folder contains everything needed to process, generate, and evaluate synthetic EHR data.
 
-1. Data Layout
+1. Data Layout\\
 data/raw/ : Raw EHR archives (ZIP files, needs to be unzipped before working with it)
 
 data/clean/ : Cleaned EHR data saved as .csv
