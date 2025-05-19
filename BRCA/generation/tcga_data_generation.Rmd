@@ -45,52 +45,6 @@ RPPA_nona <- read.csv("../data/clean/RPPA_nona.csv")
 
 summary(RPPA_tot)
 
-var_tcga <- ifelse(RPPA_nona %>% apply(2, \(x) length(unique(x))) %>% `<`(10), "d", "c")
-#look at correlations
-
-continuous_RPPA <- RPPA_nona[, which(var_tcga == "c")]
-
-
-cor_matrix <- cor(continuous_RPPA, use = "pairwise.complete.obs", method = "pearson")
-
-#make a table to the correlations
-corr_RPPA <- as.data.frame(as.table(cor_matrix))
-
-# Rename columns for clarity
-colnames(corr_RPPA) <- c("Var1", "Var2", "Correlation")
-
-# Remove self-correlations (Var1 == Var2)
-corr_RPPA <- subset(corr_RPPA, Var1 != Var2)
-
-# Create a consistent pair identifier (sorted variable names)
-corr_RPPA$Pair <- apply(corr_RPPA[, c("Var1", "Var2")], 1, function(x) paste(sort(x), collapse = "_"))
-
-# Remove duplicate pairs
-corr_RPPA <- corr_RPPA[!duplicated(corr_RPPA$Pair), ]
-
-# Sort by absolute correlation value in descending order
-corr_RPPA <- corr_RPPA[order(abs(corr_RPPA$Correlation), decreasing = TRUE), ]
-
-# Print top correlations
-head(corr_RPPA, 20)
-# Print top correlations
-top_20_tcga <- head(corr_RPPA, 20)
-
-#write.csv(RPPA_nona, "cleaned_tcga.csv")
-
-#heatmap
-hm.2 <- function(obj){
-  try(
-    heatmap.2(obj,Rowv=F,symm=T,col=colorRampPalette(c("brown","white","yellow"))(25),
-              dendrogram='none'
-              ,trace='none'
-              ,symkey=TRUE,breaks=seq(-1,1,length=26),
-              key = T), silent = TRUE)
-}  
-
-
-RPPA_nona[,which(var_tcga %in% "c")] %>% cor %>% hm.2 
-
 ```
 
 
